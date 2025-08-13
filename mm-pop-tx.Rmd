@@ -1,0 +1,160 @@
+---
+title: "MM Takahe population from tx study"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=10, fig.height=6, echo=FALSE, warning=FALSE, message=FALSE, fig.path='figure/mm-pop-tx/')
+
+source('C:/Users/adigby.DEPCON/.RProfile')
+
+
+# Disclaimer: the code in this script is horrible. I wrote it in a hurry
+```
+
+Murchison Mountains takahe population plots, from transmitter study data. Uses bootstrap sampling to add error bars to the population estimates.
+
+Input data:
+
+ * DOC-1569434
+ 
+ 
+ Method for calculating confidence intervals:
+
+``` 
+ In each period, have T tx birds, of which D are dead, and A are alive: T = A + D. Proportion of population dead, d(t) = D/T. From this, get population estimate:
+    N(t) = N(t-1) - d(t)*N(t-1) + R(t), where R(t) is number recruited in period t
+Accuracy of N(t) depends on that of d(t), which depends on proportion of population which has a tx fitted.
+To estimate confidence intervals on N(t), use bootstrap sampling:
+
+1. Randomly generate sample of N birds, of which dN=int(d*N) are dead
+2. Using bootstrap sampling to generate Ni:
+2a. assign tx to T of the N birds
+2b. Get new estimate for D (number of tx birds that are dead), and hence di = D/T.
+2c. Get new estimate for Ni(t) = N(t-1) - di(t)*N(t-1) + R(t)
+3. Repeat ~1000 times to get confidence intervals for N(t)
+
+```
+ 
+```{r params,echo=T}
+pfile <- 'DOCDM-1569434'
+```
+
+
+```{r readpopdata}
+require(xlsx)
+tempfile <- 'mmpoptx.xlsx'
+doccmurl <- paste('https://doccm.doc.govt.nz/wcc/wccproxy/d?dDocName=', pfile, sep='')
+download.file(doccmurl, destfile=tempfile, method='auto', mode='wb', quiet=T)
+
+pop <- read.xlsx(tempfile, sheetName='Population tracking', startRow=2, endRow=11, header=T)
+
+# Format data properly
+require(dplyr)
+tpop <- tbl_df(t(pop)) # Transpose, and use tbl format
+
+# Convert dates. Set Census 2010 date to 1/1/2010
+dates <- colnames(pop)
+dates <- gsub("Jan.10..census.", "1/10/2010", dates)
+dates2 <- c(as.Date('2010-10-01'), as.Date(as.numeric(as.character(gsub('X','', dates[-c(1:2)]))), origin='1899-12-30'))
+colnames(tpop) <- tpop[1, ]
+tpop <- tpop[-1,]
+tpop$Date <- dates2
+
+dpop <- as.data.frame(tpop)
+colnames(dpop)[c(1,9, 7, 8)] <- c('TotalNoRecruit', 'Total', 'Recruit', 'Supplement')
+for (nc in c(1:9)){
+  dpop[, nc] <- as.numeric(dpop[, nc])
+}
+
+dpop$Recruit[is.na(dpop$Recruit)] <- 0
+dpop$Supplement[is.na(dpop$Supplement)] <- 0
+```
+
+```{r confint}
+# Calculate confidence intervals in N(t) - estimated MM population
+# 1.
+require(boot)
+nitt <- 100 # Number of iterations for bootstrap sampling
+arrnti <- array(data=NA, dim=c(nitt, nrow(dpop)))# nt x nitt array for sampling results
+for (ti in c(2:24)){ # each timestep
+  Nt1 <- dpop[(ti-1),'Total'] # Total population alive at previous timestep
+  DT <- dpop[ti, 'Dead'] # Number of tx birds dead
+  AT <- dpop[ti, 'Alive'] # Number of tx birds alive
+  NT <- DT + AT # Number of transmittered birds
+  d <- DT / (DT + AT) # mortality rate = proportion of population dead
+  dN <- floor(d*Nt1) # Number of population dead
+  R <- dpop[ti, 'Recruit']
+  S <- dpop[ti, 'Supplement']
+  
+  # Sampling - randomly select T transmittered birds
+  PN <- rep('A',floor(Nt1)) # Whole population
+  iPD <- sample(c(1:floor(Nt1)), dN) # Dead birds in population
+  PN[iPD] <- 'D'
+  #bi <- boot(PN, pi, R=1000)
+
+# Estimate new population based on deaths, recruit+supp, and previous pop: 
+  for (i in c(1:nitt)){
+    PT <- sample(PN, NT) # fit transmitters to NT birds from population PN
+    DTi <- length(which(PT=='D')) # Number of dead in simulated tx sample
+    dTi <- DTi / length(PT) # Proportion dead in simulated tx sample
+    Nti <- Nt1 - dTi * Nt1 + R + S
+    #cat(sprintf("Total pop = %d, dead=%d, tx size= %d, tx dead=%d, tx prop.dead= %f\n", length(PN), length(iPD), NT, DTi, dTi))
+    arrnti[i, ti] <- Nti
+  } 
+}
+```
+
+# Plot population graph
+
+
+```{r mm-pop-from-tx}
+require(ggplot2)
+require(plotly)
+theme_set(theme_bw())
+
+g1 <- ggplot(dpop, aes(x=Date, y=Total)) + geom_point() + geom_line() + labs(y="Population estimate", title='MM population estimate from tx')
+
+ggplotly(g1)
+g <- plot_ly(dpop, x=~Date, y=~Total, type='scatter', mode='lines')
+#layout(g, yaxis=list(title='Individuals', range=c(0,400), zeroline=F))
+require(httr)
+set_config(use_proxy(url="webproxy",port=8080))
+
+plotly_POST(g, filename = "takahe/mm-pop-from-tx", sharing='private')
+plotly_POST(g1, filename = "takahe/mm-pop-from-tx-gg", sharing='private')
+```
+
+```{r mm-pop-from-tx-plotly}
+
+```
+
+
+Plot mean and confidence intervals from using simulation to estimate confidence intervals.
+
+ * Note: zero-length confidence intervals are a result of no deaths in the tx sample.
+
+
+```{r mm-pop-from-tx-sample}
+
+require(tidyr)
+tanti <-as.data.frame(arrnti)
+colnames(tanti) <- dpop$Date
+
+# Get mean, q5, q95 for each column (date)
+dt <- tanti %>%
+  summarise_each(funs(mean, q05=quantile(., 0.05, na.rm=T), q95=quantile(., 0.95, na.rm=T))) %>%
+  gather(variable, value) %>%
+  separate(variable, c("var", "stat"), sep = "\\_") %>%
+  spread(var, value)
+
+ddt <- dt %>% gather(Date,val,2:ncol(dt)) %>% spread(stat, val) # Transpose
+ddt$Date <- as.Date(ddt$Date)
+
+g2 <- ggplot(ddt, aes(x=Date, y=mean, ymin=q05, ymax=q95, group=1)) + geom_point() + geom_line() + geom_pointrange() + labs(y="Population estimate", title='MM population estimate from tx')
+ggplotly(g2)
+plotly_POST(g2, filename = "takahe/mm-pop-from-tx-gg-ci", sharing='private')
+```
+

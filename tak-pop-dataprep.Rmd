@@ -1,0 +1,72 @@
+Takahe Bayesian survival model preparation
+========================================================
+
+`r opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=12, echo=FALSE, warning=FALSE, message=FALSE)`
+
+```{r init}
+Sys.setenv(R_PROFILE="C:/Users/adigby/Documents/R") # Need to run this before knitting; otherwise permission errors
+```
+
+Format data from the takahe database for input to Bayesian mark-recapture models.
+
+```{r params, echo=T}
+survyears <- seq(1992, 2008, 1)
+trapyears <- seq(2002, 2007, 1)
+```
+
+
+Survival
+---------------------------
+
+```{r readsurv}
+# Capture history
+f1 <- '~/takahe/population/model-code/model-input/MM-capture-history.txt'
+encfull <- read.table(f1, header=T, sep='\t')
+
+# Trapped/untrapped for each year:
+f2 <- '~/takahe/population/model-code/model-input/banded-trapped-2002-2007.txt'
+trapfull <- read.table(f2, header=T, sep='\t')
+
+# Wearing tx?:
+f3 <- '~/takahe/population/model-code/model-input/tx-obs.txt'
+txfull <- read.table(f3, header=T, sep='\t')
+```
+
+```{r formatsurv}
+# Format survival covariates as matrix, with row for each animal, and column for each capture occasion (year)
+
+# Encounter history;
+enc <- encfull[, c('CURRENT_BA', paste('X',survyears, sep=''))]
+colnames(enc) <- c('Band', survyears)
+
+# In trapped/untrapped habitat:
+trap <- trapfull[, c('CURRENT_BA', paste('X',trapyears, sep=''))]
+colnames(trap) <- c('Band', trapyears)
+
+# Bird wearing tx?
+require(reshape2)
+tx1 <- data.frame(acast(txfull, CURRENT_BA ~ YEAR))
+tx <- cbind(Band=row.names(tx1), tx1)
+
+# Bird age:
+age1 <- encfull[, c('CURRENT_BA', 'NATAL_YEAR', paste('X', survyears, sep=''))]
+colnames(age1) <- c('Band', 'Natal', as.character(survyears))
+ageyr <- age1[, -c(1,2)]  # Remove band & natal year from array
+seen <- which(ageyr==1|ageyr==2, arr.ind=T) # Indexes for years bird seen
+ageyr2 <- ageyr
+ageyr2[1:nrow(ageyr2), 1:ncol(ageyr2)] <- NA
+for (s in 1:nrow(seen)){
+  i <- seen[s,1] # row of matrix ageyr
+  j <- seen[s,2] # column of matrix ageyr
+  ageyr2[i,j] <- as.numeric(colnames(ageyr)[j]) - as.numeric(age1[i, 'Natal']) # Encounter year-natal year
+}
+# Convert to numeric:
+for (col in 1:ncol(ageyr2)){
+  ageyr2[,col] <- as.numeric(unlist(ageyr2[,col]))
+}
+age <- cbind(Band=age1$Band, ageyr2)
+
+# Bird an adult?
+adult <- cbind(age$Band, ifelse(is.na(age[,-1]), NA, ifelse(age[,-1]>1,1,0)))
+```
+

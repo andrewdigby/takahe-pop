@@ -1,0 +1,680 @@
+---
+title: "Murchison Mountains takahe productivity models"
+author: "Andrew Digby"
+date: "18/8/2020"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    df_print: paged 
+    fig_retina: true
+    fig_width: 10
+    fig_height: 6
+    fig_caption: true
+    number_section: true
+    code_download: true
+    theme: readable
+bibliography: ./data/stoat_productivity/refs.bib
+link-citations: yes
+---
+
+<style>
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+
+
+```{r setup, echo=F, message=F, include=F}
+knitr::opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=10, echo=FALSE, warning=FALSE, cache=F, message=FALSE, fig.path='figure/prod-stoats/')
+options(width=120) # so data frames don't wrap
+source("~/Dropbox-DOC/Kakapo Dropbox/Andrew Digby/R/source/glm_utils.R")
+library(lemon) # Nicer plots and tables
+knit_print.data.frame <- lemon_print
+
+
+# Install develop branch of projpred and projpred branch of brms:
+
+#library(githubinstall)
+#gh_install_packages("projpred", ref = "develop")
+#gh_install_packages("brms", ref = "projpred")
+
+library(readxl)
+library(forcats)
+library(tidyverse)
+library(RColorBrewer)
+library(see)
+library(brms)
+library(rstan)
+library(lmerTest)
+library(lme4)
+library(nlme)
+library(effects)
+library(coefplot)
+library(summarytools)
+library(lubridate)
+library(duskyAnalysis)
+library(DT)
+library(ggplot2)
+library(corrgram)
+library(bayestestR)
+library(bayesplot)
+library(tidybayes)
+library(effectsize)
+library(mice) # for imputing missing values in brms
+library(loo)
+library(kableExtra)
+theme_set(theme_modern())
+
+
+# BRMS options:
+rstan_options (auto_write=TRUE)
+options (mc.cores=parallel::detectCores ()) # Run on multiple cores
+
+
+
+# library(conflicted)
+# conflict_prefer("select","dplyr")
+# conflict_prefer("filter","dplyr")
+# 
+# conflict_prefer("view", "summarytools")
+# 
+# conflict_prefer("lmer", "lme4")
+# conflict_prefer("loo","loo")
+# conflict_prefer("group_rows","")
+```
+
+
+```{r parameters}
+data_dir <- './data/stoat_productivity/'
+
+prod_file <- 'MM productivity analysis.xlsx'
+met_file <- 'Takahe Valley monthly mean temps & rain 1972-2012.xls'
+tussock_file <- 'takahe-valley_tussock.xlsx'
+beech_file <- 'takahe-valley-seedfall-1979-2019.csv'
+
+niter <- 30000
+
+tussock_species <- c("C. pallens", "C. crassiuscula", "C. teretifolia", "C. rubra") # tussock species to use for mean tussock flowering
+```
+
+```{r parameters2}
+# For nicer names in plots
+fn_labels <- function(string){
+  string <- sub('b_','',string)
+  string <- gsub("sc", "", string)
+  string <- gsub('mean_summer_rain','Mean monthly summer rain',string)
+  string <- gsub('mean_summer_median_temp','Mean monthly summer median temp ',string)
+  string <- gsub('PercentTussock','Tussock (%)',string)
+  string <- gsub('mt.beech.seeds.m2','Mountain Beech seeds',string)
+  return(string)
+
+}
+```
+
+
+# Introduction
+
+## Purpose
+
+To investigate whether stoat abundance and environmental factors influence takahe productivity in the Murchison Mountains. Updates analyses in @Hegg:2006 and @Hegg:2011 with more recent data. Use Bayesian linear models.
+
+## Data
+
+Data: 
+
+ * Years: 1980-2009
+ * Productivity:
+    * Number of juveniles at fledge from first clutch nests in Murchison Mountains, excluding manipulated nests
+ * Environmental:
+    * beech seedfall: mountain beech only (as silver beech not counted every year). From DOC online seed explorer 1979-2019
+    * tussock: mean of all species. From Adrian Monks, 1972-2019
+    * Weather data:
+        * 1972-2012: Takahe Valley monthly mean temps & rain 1972-2012.xls
+        * rainfall: mean monthly rainfall, breeding season (Oct-Feb) only. Don't use total rainfall, since some months have missing data
+        * temperature: mean of mean daily median temperature, breeding season (Oct-Feb) only
+
+Aligning dates:
+
+Use takahe years (Oct-Sep) to set dates.
+
+ * Productivity: value per year. 1980 = 1980-1981 takahe year. 
+ * Tussock: Recorded for summer dates - e.g. 1980-1981. Takahe year = 1980
+ * Beech: recorded in May each year; apply to following takahe year e.g. 1979-05 applies to takahe year = 1980 (Oct 1980 - Sep 1981)
+ * Weather: recorded for Year-Month. e.g. 1979-10
+ 
+ 
+## Model
+
+ * Number fledged_i | number hatched_i (binomial) ~ Beech seedfall (i-1)  + % tussock flowering (i),  + rain(Oct_i-Feb_i+1) + temp (Oct_i-Feb_i), data = MM nests per year for takahe year i, family=binomial
+
+# Data
+## Data preparation
+
+
+ * Read data
+ 
+```{r data_read}
+prod <- read_excel(file.path(data_dir, prod_file))
+met <- read_excel(file.path(data_dir, met_file))
+tussock <- read_excel(file.path(data_dir, tussock_file), sheet='Data')
+beech <- read.table(file.path(data_dir, beech_file), sep=',', header=T)
+
+```
+
+ * Assign takahe years to data
+
+```{r data_assign_years}
+# Create takahe year variable for each dataset:
+prod <- prod %>% rename(takyear = YEAR)
+beech <- beech %>% mutate(takyear=year(Date.Collected)+1) 
+tussock <- tussock %>% rename(takyear = "Takahe year")
+met <- met %>% mutate(takyear = case_when(Month_name %in% c('OCT', 'NOV', 'DEC') ~ Year,
+                                           Month_name %in% c('JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP') ~ Year - 1))
+
+# Rename long variables
+prod <- prod %>% rename(pairs="NESTING PAIRS - KNOWN FATE NO FULL CLUTCH REMOVAL", viable.eggs=`KNOWN FATE VIABLE EGGS`, fledged=`JUV OBSERVED @ FLEDGE`, Predation=`PREDATION MENTIONED IN NOTES (INCL. VANISHED)`)
+```
+
+ * Summarise weather, tussock and beech:
+   * Rain = total of rain from Oct-Feb
+   * Temp = mean of monthly mean of daily median for Oct-Feb
+   * Tussock = mean % tussock flowering across the species `r tussock_species`
+   * Beech = mountain beech only, take mean if multiple counts per year (seeds ^m2) 
+ 
+```{r data_tidy}
+#  Fledged per pair
+prod <- prod %>% mutate(fledgedpair = fledged/pairs, fledgedegg = fledged/viable.eggs, notfledged= viable.eggs - fledged)
+# Summer rainfall and mean temperature:
+metsum <- met %>% filter(Month_name %in% c('OCT', 'NOV', 'DEC', 'JAN', 'FEB')) %>% group_by(takyear) %>% summarise(mean_summer_median_temp=mean(AvgOfDailyMedianTemp, na.rm=T), mean_summer_rain = mean(Rainfall_mm, na.rm=T), tot_summer_rain=sum(Rainfall_mm, na.rm=T))
+# Mean tussock across all species:
+tussocksum <- tussock %>% group_by(takyear) %>% filter(Species %in% tussock_species) %>% summarise(FlowersPerTussock=mean(FlowersPerTussock, na.rm=T), PercentTussock=mean(PercentTussFlwring, na.rm=T))
+# Mean beech across all species:
+beechsum <- beech %>% filter(Species.Name=='Mountain Beech') %>% group_by(takyear) %>%  summarise(mt.beech.seeds.m2 = mean(Seeds.m2, na.rm=T))
+```
+ 
+
+Merge data:
+
+```{r data_merge}
+# Join by takahe year:
+data <- left_join(prod %>% select(takyear, pairs, viable.eggs, fledged, notfledged, fledgedpair, fledgedegg), tussocksum %>% select(takyear, PercentTussock), by='takyear')
+data <- left_join(data, beechsum %>% select(takyear, mt.beech.seeds.m2), by='takyear')
+data <- left_join(data, metsum, by='takyear')
+
+
+# Join by takahe year, but offset beech by 2 years:
+
+```
+
+## Data summary
+
+```{r data_summ1}
+datatable(data, filter = list(position='top', clear=F,plain=F),
+          extension=c('ColReorder','Buttons','FixedColumns'),#, 'Responsive'),
+          options = list(pageLength = 20, 
+                         autoWidth = TRUE, 
+                         colReorder=TRUE, 
+                         scrollX=TRUE,
+                         dom='Blfrtip',
+                         buttons=list('colvis', list(extend = 'collection',buttons = c('copy','csv', 'excel', 'pdf'),text = 'Download'))),
+          rownames = FALSE) %>% formatRound(c('fledgedpair', 'fledgedegg','PercentTussock', 'mean_summer_median_temp', 'mt.beech.seeds.m2', 'mean_summer_rain'),digits=1) 
+
+```
+
+
+## Data exploration
+
+Look for trends for response of fledged per pair, and fledged per viable egg
+
+```{r data_explore_fledgepair}
+wdata <- pivot_longer(data, cols=PercentTussock:mean_summer_rain,names_to='variable')
+
+g <- ggplot(wdata, aes(y=fledgedpair, x=value))  + facet_wrap(~variable, scales='free', labeller=labeller(variable=fn_labels)) + geom_smooth(method=lm)  + labs(x='', y='Fledged per pair')
+g + geom_label(aes(label=takyear),size=3, alpha=0.5, label.padding = unit(0.1, 'lines'))  
+```
+
+```{r data_explore_fledgeegg}
+
+g <- ggplot(wdata, aes(y=fledgedegg, x=value)) +  facet_wrap(~variable, scales='free', labeller=labeller(variable=fn_labels)) + geom_smooth(method=lm)  + labs(x='', y='Fledged per viable egg')
+g + geom_label(aes(label=takyear),size=3, alpha=0.5, label.padding = unit(0.1, 'lines'))
+```
+
+## Co-plots
+
+Beech seed - productivity plot is confusing. Try coplots with two weather variables:
+
+With temperature:
+
+```{r data_explore_coplot_temp}
+coplot(fledgedegg ~ mt.beech.seeds.m2 | mean_summer_median_temp, data = data, panel=panel.smooth)
+coplot(fledgedegg ~ mean_summer_rain | mean_summer_median_temp, data = data, panel=panel.smooth)
+coplot(fledgedegg ~ PercentTussock | mean_summer_median_temp, data = data, panel=panel.smooth)
+```
+
+With rainfall:
+
+```{r data_explore_coplot_rain}
+coplot(fledgedegg ~ mt.beech.seeds.m2 | mean_summer_rain, data = data, panel=panel.smooth)
+coplot(fledgedegg ~ mean_summer_median_temp | mean_summer_rain, data = data, panel=panel.smooth)
+coplot(fledgedegg ~ PercentTussock | mean_summer_rain, data = data, panel=panel.smooth)
+``` 
+
+No strong indication of need for interactions in the models.
+ 
+## Collinearity
+
+Check for collinearity among covariates:
+
+```{r data_collin}
+corrgram(data[, c('PercentTussock', 'mt.beech.seeds.m2', 'mean_summer_median_temp', 'mean_summer_rain')], upper.panel = panel.pie, lower.panel = panel.conf)
+```
+
+# Model preparation
+
+
+## General model considerations
+
+
+Have two options for the response variable:
+ * Fledged per pair: 
+  * this would have to be Gaussian, not Binomial since don't have success/failures|trials - can't define failures. But it's a poor Gaussian distribution.
+  * accounts for egg production, so better measure of effects of tussock flowering, weather and egg predation
+ * Fledged per viable egg: 
+  * Binomial: success/failures = fledged/not fledged for each viable egg
+  * doesn't account for egg production, so may be better measure of impacts of stoats, without 'dilution' from environmental impacts on egg production. Doesn't account for egg predation before eggs were candled.
+
+## Model data 
+
+## Remove outliers
+
+Remove years with <10 nests or <10 eggs.
+
+```{r remove_outliers}
+mdata <- data %>% filter(pairs >=10 & viable.eggs>=10)
+```
+
+## Summary 
+
+```{r data_summ, render=lemon_print}
+summary(mdata)
+```
+
+
+## Scale
+
+ * Scale and centre variables to mean=0.0 and s.d.=1.0
+
+```{r model_data_prep}
+
+mdata <- mdata %>% ungroup() %>% mutate_if(is.character, as.factor)
+
+# Rescale variables:
+mdata$scPercentTussock <- 0.5*scale(mdata$PercentTussock, center=T, scale=T) # *0.5 to reduce SD to 0.5 (from 1)
+mdata$scmt.beech.seeds.m2 <- 0.5*scale(mdata$mt.beech.seeds.m2, center=T, scale=T) # *0.5 to reduce SD to 0.5 (from 1)
+mdata$scmean_summer_rain <- 0.5*scale(mdata$mean_summer_rain, center=T, scale=T) # *0.5 to reduce SD to 0.5 (from 1)
+mdata$scmean_summer_median_temp <- 0.5*scale(mdata$mean_summer_median_temp, center=T, scale=T) # *0.5 to reduce SD to 0.5 (from 1)
+```
+
+Check model data trends for scaled data, fitting both linear model and LOESS smoother.
+
+```{r mdata_explore_fledgepair}
+wdata <- pivot_longer(mdata, cols=scPercentTussock:scmean_summer_median_temp,names_to='variable')
+
+(g <- ggplot(wdata, aes(y=fledgedpair, x=value)) + geom_point() + facet_wrap(~variable, scales='free', labeller=labeller(variable=fn_labels)) + geom_smooth(method=lm)  + labs(x='', y='Fledged per pair') + geom_label(aes(label=takyear),size=3, alpha=0.5, label.padding = unit(0.1, 'lines')))
+```
+
+```{r mdata_explore_fledgeegg}
+
+(g <- ggplot(wdata, aes(y=fledgedegg, x=value)) + geom_point() + facet_wrap(~variable, scales='free', labeller=labeller(variable=fn_labels)) + geom_smooth(method=loess)  + labs(x='', y='Fledged per viable egg') + geom_label(aes(label=takyear),size=3, alpha=0.5, label.padding = unit(0.1, 'lines')))
+
+(g <- ggplot(wdata, aes(y=fledgedegg, x=value)) + geom_point() + facet_wrap(~variable, scales='free', labeller=labeller(variable=fn_labels)) + geom_smooth(method=lm)  + labs(x='', y='Fledged per viable egg') + geom_label(aes(label=takyear),size=3, alpha=0.5, label.padding = unit(0.1, 'lines')))
+```
+
+
+# Model 1: fledged | fertile eggs {.tabset .tabset-fade .tabset-pills}
+
+Model with binomial response: number of eggs fledged and not fledged.
+
+## Model specification
+
+Model 1 specification:
+
+```{r formula_fegg1}
+# Frequentist model formulae
+fegg_formula1_lmer <-  as.formula(cbind(fledged, notfledged) ~  scPercentTussock + scmt.beech.seeds.m2 + scmean_summer_median_temp  + scmean_summer_rain )
+fegg_formula1_brms <-  as.formula(fledged | trials(viable.eggs) ~  scPercentTussock + scmt.beech.seeds.m2 + scmean_summer_median_temp  + scmean_summer_rain )
+catvars <- NULL
+ctsvars <- c('scPercentTussock', 'scmean_summer_median_temp', 'scmt.beech.seeds.m2', 'scmean_summer_rain')
+```
+
+## Linear model
+
+```{r lmer_fegg1}
+
+lmer.fegg<-glm(fegg_formula1_lmer, data=mdata, family='binomial')#, REML=F)
+summary(lmer.fegg)
+coefplot(lmer.fegg,  innerCI=1, outerCI=2, lwdOuter=0.5) + theme(plot.title=element_text(size=7)) + labs(title='No random factor')
+plot(allEffects(lmer.fegg, residuals=T), partial.residuals=list(smooth=TRUE, lty="dashed"))
+
+```
+
+ * dashed magenta line = loess nonparametric-regression smooth of the partial residual points, which are each equal to a point on the fitted blue line, representing the partial fit, plus the corresponding residual
+ * solid blue line: partial-regression line, which represents the fitted model
+ * If the model adequately represents the data, the dashed magenta line should match the solid blue partial-regression line
+
+## Model 1: brms  {.tabset .tabset-fade .tabset-pills}
+
+### Model setup
+
+Prior choice:
+
+ * Use a weakly informative prior (see https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations):
+  
+
+```{r brms_fegg1_run, message=TRUE, warning=TRUE, paged.print=TRUE}
+
+set.seed(3875)
+#prior1 <-  c(set_prior("normal(0,5)", class = "b"))
+prior1 <-  c(set_prior("student_t(1,0,5)", class = "b"))
+priorh1 <-  c(set_prior("horseshoe(1)", class = "b"))
+
+brms_fegg1 <- brm(fegg_formula1_brms, data=mdata, family="binomial", iter=niter, prior=prior1, sample_prior = T, save_all_pars = TRUE, refresh=0)
+
+# With missing values imputed:
+#brms_fegg1_imp <- brm_multiple(cfert_formula1, data=moddata_imp, family="bernoulli", iter=niter, prior=prior1, sample_prior = T, control=list(adapt_delta=0.999,max_treedepth = 15), save_all_pars = TRUE, refresh=0)
+print(brms_fegg1, digits=2)
+brms_fegg1 <- add_criterion(brms_fegg1, c("loo", "waic", "bayes_R2"),reloo = TRUE) # use reloo=T for problematic observations
+```
+
+```{r brms_fegg1_setup}
+# Preparation for diagnostics
+
+
+
+# Model and response:
+data <- mdata[complete.cases(mdata[,c(ctsvars,catvars)]),]
+model <- brms_fegg1 # alias
+y <- data$fledgedegg
+ylab <- 'Fledged per viable egg'
+yrep <- posterior_predict(model, draws=500)
+posterior <- as.array(model)
+np <- nuts_params(model)
+lp <- log_posterior(model)
+```
+
+### Model diagnostics {.tabset .tabset-fade .tabset-pills}
+
+#### Bayes R^2:
+
+```{r brms_fegg1_r2}
+(r2_fegg1 <- bayes_R2(model))
+(r2_fegg1 <- performance::r2(model))
+performance::performance(model)
+```
+
+#### Check priors:
+
+```{r brms_fegg1_check_prior}
+hypvars <- gsub("b_", "", brms::parnames(model)[grepl('^b_',brms::parnames(model))])
+hypotheses <- c(paste(hypvars, "<0"))
+    p_hyp<-plot(hypothesis(model, hypotheses), N=4,ask=F, plot=F)
+    # Don't plot straightaway - so can rescale x-axis
+    for (i in c(1:length(p_hyp))){
+      print(p_hyp[[i]] + scale_x_continuous(limits=c(-10,10)))
+      
+    }
+```
+
+#### Trace plots:
+
+```{r brms_fegg1_trace}
+check_trace(model, fn_labels)
+```
+
+#### Divergent transitions:
+
+```{r brms_fegg1_div}
+check_divergence(model, np, lp)
+```
+
+
+#### Zero inflation:
+
+```{r brms_fegg1_zeroinfl, eval=T}
+check_zero(model, y)
+```
+
+No zero inflation.
+
+### Model validation {.tabset .tabset-fade .tabset-pills}
+
+#### Cross-validation
+
+Perform cross-validation checks:
+
+ * LOO cross-validation: check PSIS-LOO result is reliable: all Pareto k estimates are small (k< 0.5) (Vehtari, Gelman and Gabry, 2017; Vehtari et al., 2019).
+ * Compute posterior predictive probabilities and use them to compute classification error. See https://avehtari.github.io/modelselection/diabetes.html.
+
+
+```{r brms_fegg1_crossval}
+cross_val(model)
+```
+
+
+#### Residual plots
+
+```{r brms_fegg1_resids, eval=T}
+check_resids(model)
+```
+
+#### Heterogeneity checks:
+
+```{r brms_fegg1_hetero}
+check_heterogeneity(model, y, catvars=NULL, ctsvars=ctsvars, fn_labels)
+```
+
+#### Model fit
+
+```{r brms_fegg1_modelfit}
+check_posterior(model, y, catvars=NULL, ctsvars, ylab)
+```
+
+### Model visualisation {.tabset .tabset-fade .tabset-pills}
+
+
+#### Coefficients
+
+```{r brms_fegg1_coef, render=lemon_print,  R.options = list(width = 1000)}
+check_coefs(model, fn_labels, catvars=NULL, ctsvars, plot_hypotheses = T)
+```
+
+
+#### Marginal effects
+
+Marginal effects Note that all interactions are plotted, even if not modelled:
+
+Note: can't plot points as have response variable with |trials (TO DO).
+
+```{r brms_fegg1_marginal, render=lemon_print}
+check_marginal(model, catvars=NULL, ctsvars=ctsvars, interactions=NULL, ylab=ylab, y=y, fn_labels=fn_labels, plotpoints=F)
+```
+
+
+# Model 2: fledged | pairs nesting {.tabset .tabset-fade .tabset-pills}
+
+Model with Gaussian response: number of juveniles fledged divided by the number of pairs
+
+## Model specification
+
+Model 2 specification:
+
+```{r formula_fpair1}
+# Frequentist model formulae
+fpair_formula1_lmer <-  as.formula(fledgedpair ~  scPercentTussock + scmt.beech.seeds.m2 + scmean_summer_median_temp  + scmean_summer_rain )
+fpair_formula1_brms <-  as.formula(fledgedpair ~  scPercentTussock + scmt.beech.seeds.m2 + scmean_summer_median_temp  + scmean_summer_rain )
+ctsvars <- c('scPercentTussock', 'scmean_summer_median_temp', 'scmt.beech.seeds.m2', 'scmean_summer_rain')
+```
+
+## Linear model
+
+```{r lmer_fpair1}
+
+lmer.fpair<-glm(fpair_formula1_lmer, data=mdata, family='binomial')#, REML=F)
+summary(lmer.fpair)
+coefplot(lmer.fpair,  innerCI=1, outerCI=2, lwdOuter=0.5) + theme(plot.title=element_text(size=7)) + labs(title='No random factor')
+plot(allEffects(lmer.fpair, residuals=T), partial.residuals=list(smooth=TRUE, lty="dashed"))
+
+```
+
+ * dashed magenta line = loess nonparametric-regression smooth of the partial residual points, which are each equal to a point on the fitted blue line, representing the partial fit, plus the corresponding residual
+ * solid blue line: partial-regression line, which represents the fitted model
+ * If the model adequately represents the data, the dashed magenta line should match the solid blue partial-regression line
+
+## Model 2: brms  {.tabset .tabset-fade .tabset-pills}
+
+### Model setup
+
+Prior choice:
+
+ * Use a weakly informative prior (see https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations):
+  
+
+```{r brms_fpair1_run, message=TRUE, warning=TRUE, paged.print=TRUE}
+
+set.seed(3875)
+#prior1 <-  c(set_prior("normal(0,5)", class = "b"))
+prior1 <-  c(set_prior("student_t(1,0,5)", class = "b"))
+priorh1 <-  c(set_prior("horseshoe(1)", class = "b"))
+
+brms_fpair1 <- brm(fpair_formula1_brms, data=mdata, family="gaussian", iter=niter, prior=prior1, sample_prior = T, save_all_pars = TRUE, refresh=0)
+
+# With missing values imputed:
+#brms_fpair1_imp <- brm_multiple(cfert_formula1, data=moddata_imp, family="bernoulli", iter=niter, prior=prior1, sample_prior = T, control=list(adapt_delta=0.999,max_treedepth = 15), save_all_pars = TRUE, refresh=0)
+print(brms_fpair1, digits=2)
+brms_fpair1 <- add_criterion(brms_fpair1, c("loo", "waic", "bayes_R2"),reloo = TRUE) # use reloo=T for problematic observations
+```
+
+```{r brms_fpair1_setup}
+# Preparation for diagnostics
+# Model and response:
+data <- mdata[complete.cases(mdata[,c(ctsvars,catvars)]),]
+model <- brms_fpair1 # alias
+y <- data$fledgedpair
+ylab <- 'Fledged per pair'
+yrep <- posterior_predict(model, draws=500)
+posterior <- as.array(model)
+np <- nuts_params(model)
+lp <- log_posterior(model)
+```
+
+### Model diagnostics {.tabset .tabset-fade .tabset-pills}
+
+#### Bayes R^2:
+
+```{r brms_fpair1_r2}
+(r2_pair1 <- bayes_R2(model))
+```
+
+#### Check priors:
+
+```{r brms_fpair1_check_prior}
+hypvars <- gsub("b_", "", brms::parnames(model)[grepl('^b_',brms::parnames(model))])
+hypotheses <- c(paste(hypvars, "<0"))
+    p_hyp<-plot(hypothesis(model, hypotheses), N=4,ask=F, plot=F)
+    # Don't plot straightaway - so can rescale x-axis
+    for (i in c(1:length(p_hyp))){
+      print(p_hyp[[i]] + scale_x_continuous(limits=c(-10,10)))
+      
+    }
+```
+
+#### Trace plots:
+
+```{r brms_fpair1_trace}
+check_trace(model, fn_labels)
+```
+
+#### Divergent transitions:
+
+```{r brms_fpair1_div}
+check_divergence(model, np, lp)
+```
+
+
+#### Zero inflation:
+
+```{r brms_fpair1_zeroinfl, eval=T}
+check_zero(model, y)
+```
+
+No zero inflation.
+
+### Model validation {.tabset .tabset-fade .tabset-pills}
+
+#### Cross-validation
+
+Perform cross-validation checks:
+
+ * LOO cross-validation: check PSIS-LOO result is reliable: all Pareto k estimates are small (k< 0.5) (Vehtari, Gelman and Gabry, 2017; Vehtari et al., 2019).
+ * Compute posterior predictive probabilities and use them to compute classification error. See https://avehtari.github.io/modelselection/diabetes.html.
+
+
+```{r brms_fpair1_crossval}
+cross_val(model)
+```
+
+
+#### Residual plots
+
+```{r brms_fpair1_resids, eval=T}
+check_resids(model)
+```
+
+#### Heterogeneity checks:
+
+```{r brms_fpair1_hetero}
+check_heterogeneity(model, y, catvars, ctsvars, fn_labels)
+```
+
+#### Model fit
+
+```{r brms_fpair1_modelfit}
+check_posterior(model, y, catvars, ctsvars, ylab)
+```
+
+### Model visualisation {.tabset .tabset-fade .tabset-pills}
+
+
+#### Coefficients
+
+```{r brms_fpair1_coef, render=lemon_print, R.options = list(width = 1000)}
+check_coefs(model, fn_labels, catvars, ctsvars, plot_hypotheses = T)
+```
+
+
+#### Marginal effects
+
+Marginal effects Note that all interactions are plotted, even if not modelled:
+
+```{r brms_fpair1_marginal, render=lemon_print}
+check_marginal(model, catvars=NULL, ctsvars, interactions=NULL, ylab=ylab, y=y, fn_labels=fn_labels)
+```
+
+
+# Discussion
+
+ * Model with fledged|fertile eggs response is much better fit to data `r r2_pair1` vs `r r2_fegg1`.
+ * 
+
+# Operating environment
+
+```{r op_env}
+sessionInfo()
+```
+

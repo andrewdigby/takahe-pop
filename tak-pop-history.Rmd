@@ -1,0 +1,84 @@
+---
+title: "Takahe population"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=10, fig.height=6, echo=FALSE, warning=FALSE, message=FALSE, fig.path='figure/pop-hist/')
+
+source('C:/Users/adigby.DEPCON/.RProfile')
+
+```
+
+Takahe population plots - all sites
+
+## Takahe population history per site
+
+
+Input data
+ * Takahe Master Reporing Data - DOC-1566874
+ 
+```{r params,echo=T}
+pfile <- 'DOCDM-1566874'
+```
+
+
+```{r readpopdata}
+require(xlsx)
+tempfile <- 'takpop.xlsx'
+# https://doccm.doc.govt.nz/wcc/faces/wccdoc?dDocName=DOCDM-1566874
+doccmurl <- paste('https://doccm.doc.govt.nz/wcc/wccproxy/d?dDocName=', pfile, sep='')
+# Download file from DOCCM
+#setInternet2(TRUE) # required for https used by DOCCM
+download.file(doccmurl, destfile=tempfile, method='auto', mode='wb', quiet=T)
+
+ind <- read.xlsx(tempfile, sheetName='Summary', startRow=44, colIndex=c(3:9), header=T, colClasses=rep('numeric',7))
+ind$Date <- as.Date(sprintf("%s-09-30",ind$YEAR))
+```
+
+```{r reshape}
+# Reshape for plotting
+require(tidyr)
+gind <- gather(ind, Site, n, 2:7)
+```
+
+
+```{r ind-total}
+require(ggplot2)
+require(plotly)
+theme_set(theme_bw())
+
+g <- plot_ly(ind, x=~Date, y=~Total, type='scatter', mode='lines')
+layout(g, yaxis=list(title='Individuals', range=c(0,400), zeroline=F))
+
+```
+
+
+```{r ind-bysite-bar}
+gind$Site <- gsub('...',' + ',gind$Site, fixed=T)
+gind$Site <- gsub('.',' ',gind$Site, fixed=T)
+gind$Site <- gsub(' outside','-',gind$Site, fixed=T)
+gind$Site <- factor(gind$Site)
+gind$Site <- factor(gind$Site, levels=rev(levels(gind$Site)))
+
+g <- plot_ly(subset(gind, Site!='Total'), x=~Date, y=~n, color=~Site, type='bar') %>% layout(barmode='stack', yaxis=list(title="Individuals"))
+g
+require(httr)
+set_config(use_proxy(url="webproxy",port=8080))
+
+plotly_POST(g, filename = "takahe/individuals-by-site")
+
+save(gind, file='takahe-pop-hist-all-sites.Rdata')
+```
+
+```{r ind-bysite-line}
+
+g <- plot_ly(subset(gind), x=~Date, y=~n, color=~Site, type='scatter', mode='lines') %>% layout( yaxis=list(title="Individuals"))
+g
+require(httr)
+set_config(use_proxy(url="webproxy",port=8080))
+
+plotly_POST(g, filename = "takahe/individuals-by-site-line", sharing='secret')
+```

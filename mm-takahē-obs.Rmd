@@ -1,0 +1,74 @@
+---
+title: "MM takahē observed by date"
+author: "Andrew Digby"
+date: "16/10/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=10, fig.height=6, echo=FALSE, warning=FALSE, message=FALSE, fig.path='figure/mm-tak-obs/')
+
+```
+
+Summaries from the pre-2011 Takahe database: calculates the number of takahe tracked/observed in each quarter. For:
+
+ * Assessing takahe deaths as proportion of the population for Density Impact Functions
+ 
+ 
+ 
+ 
+```{r params}
+basedir <- "~/Dropbox-DOC/Kakapo Dropbox/Andrew Digby/takahe/MM/DIF/"
+birdobsfile <- 'Pre-2010-BIRDOBS.xlsx'
+```
+
+```{r readinput}
+
+require(readxl)
+bo <- read_xlsx(file.path(basedir, birdobsfile), sheet='BIRDOBS', col_names=T)  
+```
+
+```{r calc_quarters}
+
+bo <- bo[order(bo$DATE), ]
+bo <- subset(bo, tolower(OBSTYPE) %in% c('seen', 'heard', 'handled'))
+
+require(zoo)
+bo$quarter <- as.yearqtr(bo$DATE, with_year=T)
+
+# Keep only one observation per bird per quarter
+# Assume all 'unbanded' and 'unidentified' birds are different
+require(dplyr)
+bo <- bo %>% group_by(quarter,CURRENT_BA) %>% mutate( bandseq=paste(CURRENT_BA,row_number())) # number obs of unbanded/unidentified birds each quarter
+bod <- data.frame(bo)
+bod$Band <-  ifelse(bod$CURRENT_BA %in% c('unbanded', 'unidentified'), bod$bandseq, bod$CURRENT_BA)
+bodun_diff <- bod[!duplicated(bod[, c('quarter', 'Band')]), ]
+
+# Count birds assuming all 'unbanded' and 'unidentified' birds are same
+bodun_same <- bod[!duplicated(bod[, c('quarter', 'CURRENT_BA')]), ]
+
+# Only birds with positive ID:
+bod_posid <- bod[!duplicated(bod[, c('quarter', 'Band')])&!grepl("unbanded|unidentified", bod$Band), ]
+
+# Date sequence - including all quarters
+start <- as.Date(min(bod$DATE, na.rm=T))
+end <- as.Date(max(bod$DATE, na.rm=T))
+#all_quarters <- data.frame(quarter=quarter(seq(start, end, by='quarter'), with_year=T))
+require(zoo)
+sq <- seq(start, end, by='quarter')
+all_quarters <- data.frame(Date=as.Date(as.yearqtr(sq, format='%YQ%q')), quarter=as.yearqtr(sq, format='%YQ%q'))
+
+# Number of different birds observed each quarter:
+obs_quart_diff <- bodun_diff %>% group_by(quarter) %>% summarise(n=n()) # assume unidentified all different
+obs_quart_same <- bodun_same %>% group_by(quarter) %>% summarise(n=n()) # assume unidentified all same
+obs_quart_posid <- bod_posid %>% group_by(quarter) %>% summarise(n=n()) # only positively-identified birds
+
+# Merge quarters with two columns for number of birds observed each quarter
+obs_quart1 <- left_join(all_quarters, obs_quart_diff)
+obs_quart <- left_join(obs_quart1, obs_quart_same, by='quarter')
+obs_quart <- left_join(obs_quart, obs_quart_posid, by='quarter')
+colnames(obs_quart)[3:5] <- c('Diff', 'Same', 'PosID')
+
+write.table(obs_quart, file=file.path(basedir, "birds_per_quarter.csv"), sep=",", row.names=F)
+```
+

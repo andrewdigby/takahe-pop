@@ -1,0 +1,47 @@
+---
+title: "MM Population History"
+author: "Andrew Digby"
+output: html_document
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(dev=c('png','pdf'), comment="", fig.width=10, echo=FALSE, warning=FALSE, message=FALSE, fig.path='figure/mm-pop-hist/')
+```
+
+
+MM takahe population stats for each year since surveys begain. Includes ground- and tx studies.
+
+Input data:
+
+ * DOC-2690211 - MM annual takahe stats
+ 
+```{r params, echo=TRUE}
+pfile <- 'DOC-2690211'
+
+```
+
+
+```{r readdata}
+# Download file from DOCCM
+tempfile <- 'mmpop.xlsx'
+doccmurl <- paste('https://doccm.doc.govt.nz/wcc/wccproxy/d?dDocName=', pfile, sep='')
+require(xlsx)
+download.file(doccmurl, destfile=tempfile, method='auto', mode='wb', quiet=T)
+
+mp <- read.xlsx(tempfile, sheetName='MM stats')
+
+```
+
+# Recruitment
+
+```{r recruitment}
+require(ggplot2)
+theme_set(theme_bw())
+g <- ggplot(mp, aes(x=Year, y=Mean.chicks.per.pair, group=1)) + geom_point() + geom_line() # + stat_summary(fun.y='mean', colour='red')
+
+# Add mean
+meanchicks <- mean(mp$Mean.chicks.per.pair, na.rm=T)
+medchicks <- median(mp$Mean.chicks.per.pair, na.rm=T)
+g + geom_abline(intercept=meanchicks, slope=0, colour='red')+ geom_abline(intercept=medchicks, slope=0, colour='blue') + geom_text(data=mp[1,], inherit.aes = F, aes(x=2010, y=0.8, label=sprintf('Mean = %.2f', meanchicks)), colour='red' ) + geom_text(data=mp[1,], inherit.aes = F, aes(x=2010, y=0.75, label=sprintf('Median = %.2f', medchicks)), colour='blue' )
+```
+
