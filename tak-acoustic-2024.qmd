@@ -1,0 +1,284 @@
+---
+title: "Murchison Mountains acoustic survey 2024"
+author: "Glen Greaves, Andrew Digby"
+date: "`r Sys.Date()`"
+toc: true
+number-sections: true
+knitr:
+  opts_chunk:
+    fig.path: "figure/NAME"
+    dev: 'png'
+execute:
+  echo: false
+  warning: false
+  message: false
+  cache: true
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    df-print: kable
+    code-line-numbers: true
+    fig-width: 12
+  pdf:
+    geometry: 
+      - top=30mm
+      - left=30mm
+editor:
+  source
+---
+
+```{r}
+#| label: load-packages
+#| code-summary: "Packages"
+#| message: false
+
+library(tidyverse)
+packages <- c(
+"readxl", "lubridate", "purrr",
+"ggplot2", "ggpubr",
+"yardstick" # for contingency stats
+)
+
+suppressMessages(walk(packages, library, character.only = T))
+
+# Utilities:
+library(conflicted)
+conflicts_prefer(dplyr::select(),
+                 dplyr::filter(),
+                 dplyr::lag())
+
+theme_set(theme_minimal(base_size = 16))
+theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) # remove gridlines
+
+# Function for printing tables
+render_table <- function(df) {
+
+# Display datatable with numeric columns rounded to 2 digits
+  DT::datatable(
+    df,
+    extensions = 'Buttons',
+    options = list(
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      pageLength = 10
+    )
+  ) 
+    
+}
+```
+
+
+# Purpose
+
+Quick look at results from 2024 acoustic takahe survey in the Murchison Mountains.
+
+# Parameters
+
+```{r}
+#| label: params
+#| code-summary: "Parameters"
+#| echo: true
+
+takahe_sharepoint <- 'https://docnz.sharepoint.com/:x:/t/TakaheRecovery/'
+
+results_file_2024 <- sprintf('/Users/%s/Library/CloudStorage/OneDrive-DepartmentofConservation/Takahe Team/Takahe_Shared_Files/Research/Acoustic survey trials/Murchies Acoustic Survey Trial Data.xlsx', Sys.getenv("USER"))
+
+
+
+
+```
+
+# Data
+
+
+Read data:
+
+```{r}
+#| label: read_data
+#| code-summary: "Read data"
+
+
+# library(Microsoft365R)
+# 
+# # Authenticate with Microsoft 365
+# site <- get_sharepoint_site(takahe_sharepoint)
+# 
+# # Access the document library
+# doclib <- site$get_drive()
+# 
+# # Download the file
+# file <- doclib$get_item("Shared Documents/yourfile.xlsx")
+# file$download(dest = "yourfile.xlsx")
+
+# Read the results file and combine all tabs into one dataframe
+
+# Get all sheet names
+sheet_names <- excel_sheets(results_file_2024)
+
+# Read and combine all sheets into one data frame
+# Convert all columns to character to enable binding different column types
+ac2024 <- map_dfr(sheet_names, ~ read_excel(results_file_2024, sheet = .x) %>%
+                     mutate(across(everything(), as.character),
+                            block = .x)) %>%
+
+  janitor::clean_names(.)
+
+cat(sprintf("Read %d rows from %d sheets in %s\n", nrow(ac2024), length(sheet_names), results_file_2024 ))
+```
+
+Tidy data:
+
+ * For multiple results from the same territory, take maximum of birds responded.
+
+```{r}
+#| label: tidy_data
+#| 
+# Convert to numeric:
+ac2024 <- ac2024 %>%
+  mutate(across(c(birds_responded, distance_m, birds_surveyed), as.numeric))
+
+# Maximum number of birds recorded in each territory
+ac2024_max <- ac2024 %>%
+  group_by(territory) %>%
+  slice_max(order_by = birds_responded, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+```
+
+# Results
+
+
+Success by block as number of birds detected vs surveyed: use regression evaluation.
+
+ * mae = mean absolute error
+ * rmse = root mean square error
+ * rsq = R-squared
+
+Over all blocks:
+
+```{r}
+#| label: regression_all
+#| code-summary: "Regression analysis over all blocks"
+#| 
+# Remove rows with NA in either column
+ac2024_max2 <- ac2024_max %>%
+  filter(!is.na(birds_responded), !is.na(birds_surveyed))
+
+# Overall regression metrics
+overall_metrics <- metric_set(mae, rmse, rsq)(ac2024_max2, truth = birds_surveyed, estimate = birds_responded)
+overall_metrics %>%
+  render_table(.)
+
+
+```
+
+Number detected by acoustic and ground survey per block:
+
+```{r}
+#| label: number_per_block
+#| code-summary: "Number detected per block"
+#| 
+
+# Grouped regression metrics by block
+block_metrics <- ac2024_max2 %>%
+  group_by(block) %>%
+  summarise(
+        total_acoustic = sum(birds_responded, na.rm = T), 
+    total_ground = sum(birds_surveyed, na.rm = T), 
+
+    mae = mae_vec(truth = birds_surveyed, estimate = birds_responded, na_rm = TRUE),
+    rmse = rmse_vec(truth = birds_surveyed, estimate = birds_responded, na_rm = TRUE),
+    rsq = rsq_vec(truth = birds_surveyed, estimate = birds_responded, na_rm = TRUE)
+  )
+
+lblock_metrics <- block_metrics %>%
+  pivot_longer(cols = starts_with("total"), names_to = 'method') %>%
+    mutate(method = recode(method,
+                       "total_acoustic" = "Acoustic",
+                       "total_ground" = "Ground"))
+
+
+# Plot
+ggplot(lblock_metrics, aes(x = block, y = value, fill = method, colour = method)) +
+  geom_col(position = "dodge") +
+    theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(colour = 'Survey method', fill = 'Survey method', y = 'Number detected') +
+ scale_colour_manual(values = Manu::get_pal("Takahe")) +
+ scale_fill_manual(values = Manu::get_pal("Takahe"))
+
+```
+
+Regression error metrics per block:
+
+```{r}
+#| label: regression_block
+#| code-summary: "Regression analysis per block"
+#| 
+
+
+render_table(block_metrics)
+
+lblock_metrics <- block_metrics %>%
+  pivot_longer(cols = c(-block, -total_acoustic, -total_ground), names_to = "metric", values_to = "value")
+
+
+# Plot
+ggplot(lblock_metrics, aes(x = block, y = value, fill = block, colour = block)) +
+  geom_col(position = "dodge") +
+  #geom_point() +
+  facet_wrap(~ metric, scales = "free_y") +
+  labs(title = "Error Metrics by Block", x = "Block", y = "Value") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(fill = 'none', colour = 'none') 
+
+
+
+```
+
+Proportional accuracy by block
+
+```{r}
+#| label: prop_acc_block
+#| code-summary: "Proportional accuracy by block"
+#| fig-height: 8
+
+
+# Calculate proportional accuracy and standard deviation
+ac2024_accuracy <- ac2024_max %>%
+  mutate(
+    birds_responded = as.numeric(birds_responded),
+    birds_surveyed = as.numeric(birds_surveyed)
+  ) %>%
+  filter(!is.na(birds_responded), !is.na(birds_surveyed), birds_surveyed > 0, !is.na(block)) %>%
+  mutate(
+    accuracy = birds_responded / birds_surveyed
+  ) %>%
+  group_by(block) %>%
+  summarise(
+    mean_accuracy = mean(accuracy, na.rm = TRUE),
+    sd_accuracy = sd(accuracy, na.rm = TRUE),
+    n = n(),
+    se_accuracy = sd_accuracy / sqrt(n)
+  )
+
+# Plot with error bars (standard deviation)
+ggplot(ac2024_accuracy, aes(x = block, y = mean_accuracy)) +
+  geom_col(fill = "#6C90B9") +
+  geom_pointrange(aes(ymin = mean_accuracy - sd_accuracy, ymax = mean_accuracy + sd_accuracy),
+                width = 0.2, color = "darkblue") +
+  labs(title = "Proportional Accuracy by Block",
+       x = "Block", y = "Mean Accuracy (Birds Responded / Birds Surveyed)") +
+  ylim(0, 1.1) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray") +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
