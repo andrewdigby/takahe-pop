@@ -1,0 +1,325 @@
+---
+title: "Whakatipu IPM example"
+author: "Andrew Digby"
+date: "`r Sys.Date()`"
+toc: true
+number-sections: true
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    df-print: kable
+    code-line-numbers: true
+  pdf:
+    geometry: 
+      - top=30mm
+      - left=30mm
+execute:
+  cache: false
+  echo: false
+  warning: false
+  message: false
+  freeze: true
+editor:
+  source
+---
+
+# Load packages
+
+```{r}
+#| label: load-packages
+#| code-summary: "Packages"
+#| message: false
+
+library(tidyverse)
+
+packages <- c("nimble", 
+              "ggplot2", 
+              "coda")
+walk(packages, library, character.only = T)
+
+theme_set(theme_minimal())
+```
+
+# Introduction
+
+Integrated population model demonstration for the Whakatipu takahe, using simulated data. Uses `nimble` package.
+
+## Structure
+
+Population process:
+    N[t+1] = S[t] * N[t] + R[t]
+    where R[t] = λ[t] * nests[t] * J[t]
+
+Adult survival:
+    telemetry data -> estimate S[t]
+    y[i,t] ~ Bernoulli(S[t])
+
+Nest productivity:
+    chicks[i,t] ~ Poisson(λ[t]) or observed counts
+    λ[t] = mean chicks per nest
+
+Juvenile survival:
+    yearling_count[i,t+1] ~ Binomial(chicks[i,t], J[t])
+    J[t] = juvenile survival probability. 
+    chicks[i,t] = chicks fledged
+
+Recruitment:
+    R[t] = λ[t] * nests[t] * J[t]
+    nests[t] = total nests (estimated from breeding pairs)
+
+
+# Data
+
+Use example parameters to simulate data.
+
+## Parameters
+
+```{r}
+#| label: params
+#| code-summary: "Parameters"
+#| message: false
+
+# Parameters
+n_years <- 5
+n_adults <- 50
+n_nests <- 8 # nests monitored
+true_S <- rep(0.85, n_years-1)   # adult survival
+true_J <- rep(0.5, n_years-1)    # juvenile survival
+true_lambda <- rep(2, n_years-1) # chicks per nest
+true_N <- numeric(n_years)
+true_N[1] <- 50
+```
+
+## Simulate data
+
+```{r}
+#| label: simulate_data
+#| code-summary: "Simulate data"
+#| message: false
+
+
+# ---------------------------
+# Simulate example data
+# ---------------------------
+set.seed(123)
+# Population process
+for(t in 1:(n_years-1)) {
+  R <- true_lambda[t] * n_nests * true_J[t]
+  true_N[t+1] <- rpois(1, true_N[t]*true_S[t] + R)
+}
+
+# Telemetry survival data
+adult_survival <- matrix(NA, nrow=n_adults, ncol=n_years-1)
+for(t in 1:(n_years-1)) {
+  adult_survival[,t] <- rbinom(n_adults, 1, true_S[t])
+}
+
+# Nest productivity and yearling data
+chicks <- numeric(n_nests*(n_years-1))
+yearlings <- numeric(n_nests*(n_years-1))
+nest_year_index <- numeric(n_nests*(n_years-1))
+idx <- 1
+for(t in 1:(n_years-1)) {
+  for(i in 1:n_nests) {
+    nest_year_index[idx] <- t
+    chicks[idx] <- rpois(1, true_lambda[t])
+    yearlings[idx] <- rbinom(1, chicks[idx], true_J[t])
+    idx <- idx + 1
+  }
+}
+
+# Counts
+count <- true_N
+```
+
+# Integrated population model
+
+## Define IPM
+
+Define IPM in Nimble
+
+```{r}
+#| label: define_ipm
+#| code-summary: "Define IPM"
+#| message: false
+# ---------------------------
+# Define IPM in NIMBLE
+# ---------------------------
+ipm_code <- nimbleCode({
+  for(t in 1:(n_years-1)) {
+    S[t] ~ dbeta(2, 2)          # Adult survival
+    J[t] ~ dbeta(2, 2)          # Juvenile survival
+    lambda[t] ~ dnorm(2, 1)     # Mean chicks per nest
+  }
+  
+  N[1] ~ dpois(init_N)
+  for(t in 1:(n_years-1)) {
+    R[t] <- lambda[t] * nests[t] * J[t]
+    N[t+1] ~ dpois(N[t]*S[t] + R[t])
+  }
+  
+  # Adult survival likelihood
+  for(i in 1:n_adults) {
+    for(t in 1:(n_years-1)) {
+      y[i,t] ~ dbern(S[t])
+    }
+  }
+  
+  # Nest productivity and juvenile survival
+  for(i in 1:n_nests_total) {
+    chicks[i] ~ dpois(lambda[year_nest[i]])
+    yearlings[i] ~ dbinom(J[year_nest[i]], chicks[i])
+  }
+  
+  # Count data
+  for(t in 1:n_years) {
+    count[t] ~ dpois(N[t])
+  }
+})
+```
+
+
+## Prepare data
+
+Prepare data and constants
+
+```{r}
+#| label: prep_data
+#| code-summary: "Prepare data"
+#| message: false
+
+# ---------------------------
+# Prepare data and constants
+# ---------------------------
+constants <- list(
+  n_years = n_years,
+  n_adults = n_adults,
+  n_nests_total = length(chicks),
+  nests = rep(n_nests, n_years-1),
+  year_nest = nest_year_index
+)
+
+data <- list(
+  y = adult_survival,
+  chicks = chicks,
+  yearlings = yearlings,
+  count = count,
+  init_N = count[1]
+)
+
+inits <- list(
+  S = rep(0.8, n_years-1),
+  J = rep(0.5, n_years-1),
+  lambda = rep(2, n_years-1),
+  N = count
+)
+```
+
+
+## Run model
+
+```{r}
+#| label: run_ipm
+#| code-summary: "Run IPM"
+#| message: false
+# ---------------------------
+# Step 4: Build and run the model
+# ---------------------------
+ipm_model <- nimbleModel(code = ipm_code, data = data, constants = constants, inits = inits)
+ipm_conf <- configureMCMC(ipm_model, monitors = c("S", "J", "lambda", "N"))
+ipm_mcmc <- buildMCMC(ipm_conf)
+
+Cmodel <- compileNimble(ipm_model)
+Cmcmc <- compileNimble(ipm_mcmc, project = ipm_model)
+samples <- runMCMC(Cmcmc, niter = 10000, nburnin = 2000, thin = 10)
+```
+
+# Results
+
+## Print results
+
+```{r}
+#| label: print_results
+#| code-summary: "Print results"
+#| message: false
+
+print(summary(samples))
+```
+
+## Plot results
+
+### MCMC samples
+
+```{r}
+#| label: mcmc_samples
+#| code-summary: "MCMC samples"
+#| message: false
+
+# Convert samples to mcmc object
+mcmc_samples <- as.mcmc(samples)
+
+# Quick summary
+summary(mcmc_samples)
+```
+
+### Trace plots
+
+```{r}
+#| label: trace_plots
+#| code-summary: "Trace plots"
+#| message: false
+
+par(mfrow=c(2,2))
+traceplot(mcmc_samples[,grep('S', colnames(mcmc_samples))], main='Traceplot: Adult Survival (S)')
+traceplot(mcmc_samples[,grep('J', colnames(mcmc_samples))], main='Traceplot: Juvenile Survival (J)')
+traceplot(mcmc_samples[,grep('lambda', colnames(mcmc_samples))], main='Traceplot: Chicks per Nest (lambda)')
+traceplot(mcmc_samples[,grep('N', colnames(mcmc_samples))], main='Traceplot: Population Size (N)')
+```
+
+### Density plots
+
+```{r}
+#| label: density_plots
+#| code-summary: "Density plots"
+#| message: false
+
+# Density plots using ggplot2
+posterior_df <- as.data.frame(mcmc_samples) 
+# Remove [ and ] from column names
+names(posterior_df) <- gsub("\\[|\\]", "", names(posterior_df))
+
+
+ls_post_df <- posterior_df %>%
+  pivot_longer(cols = S1:S4, names_to = 'Year', values_to = 'Survival')
+
+# Adult survival
+ggplot(ls_post_df, aes(x=Survival, colour = Year, fill = Year )) +
+  geom_density(alpha=0.5) +
+  geom_vline(xintercept = true_S, linetype = 'dotted') +
+  labs(title='Posterior Distribution: Adult Survival', x='Adult survival', y='Density')
+
+lj_post_df <- posterior_df %>%
+  pivot_longer(cols = J1:J4, names_to = 'Year', values_to = 'Survival')
+
+ggplot(lj_post_df, aes(x=Survival, colour = Year, fill = Year )) +
+  geom_density(alpha=0.5) +
+  geom_vline(xintercept = true_J, linetype = 'dotted') +
+  labs(title='Posterior Distribution: Juvenile Survival', x='Survival', y='Density')
+
+# Lambda (mean chicks per nest)
+ll_post_df <- posterior_df %>%
+  pivot_longer(cols = lambda1:lambda4, names_to = 'Year', values_to = 'Lambda')
+
+ggplot(ll_post_df, aes(x=Lambda, colour = Year, fill = Year )) +
+  geom_density(alpha=0.5) +
+  geom_vline(xintercept = true_lambda, linetype = 'dotted') +
+  labs(title='Posterior Distribution: mean chicks per nest', x='Mean chicks per nest', y='Density')
+
+
+
+
+```

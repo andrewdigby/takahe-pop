@@ -1,0 +1,455 @@
+---
+title: "Murchison Mountains acoustic survey sensitivity analysis"
+author: "Andrew Digby, Glen Greaves"
+date: "`r Sys.Date()`"
+toc: true
+number-sections: true
+knitr:
+  opts_chunk:
+    fig.path: "figure/NAME"
+    dev: 'png'
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: true
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    self-contained: true
+    code-fold: true
+    code-tools: true
+    df-print: kable
+    code-line-numbers: true
+    fig-width: 12
+  pdf:
+    geometry: 
+      - top=30mm
+      - left=30mm
+editor:
+  source
+---
+
+```{r}
+#| label: load-packages
+#| code-summary: "Packages"
+#| message: false
+
+library(tidyverse)
+packages <- c(
+"readxl", "lubridate", "purrr",
+"ggplot2", "ggpubr", "scales",
+"tictoc",
+"yardstick" # for contingency stats
+)
+
+suppressMessages(walk(packages, library, character.only = T))
+
+# Utilities:
+library(conflicted)
+conflicts_prefer(dplyr::select(),
+                 dplyr::filter(),
+                 dplyr::lag())
+
+theme_set(theme_minimal(base_size = 16))
+theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) # remove gridlines
+
+# Function for printing tables
+render_table <- function(df) {
+
+# Display datatable with numeric columns rounded to 2 digits
+  DT::datatable(
+    df,
+    extensions = 'Buttons',
+    options = list(
+      dom = 'Bfrtip',
+      buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+      pageLength = 10
+    )
+  ) 
+    
+}
+
+```
+
+# Parameters
+
+```{r}
+#| label: params
+#| code-summary: "Parameters"
+#| echo: true
+
+takahe_sharepoint <- 'https://docnz.sharepoint.com/:x:/t/TakaheRecovery/'
+
+results_file_2024 <- sprintf('/Users/%s/Library/CloudStorage/OneDrive-DepartmentofConservation/Takahe Team/Takahe_Shared_Files/Research/Acoustic survey trials/Murchies Acoustic Survey Trial Data.xlsx', Sys.getenv("USER"))
+
+
+n_iter <- 5000
+
+```
+
+# Purpose
+
+Conduct a sensitivity analysis to assess the impact of sampling a subset of territories and listening locations during the acoustic takahe survey in the Murchison Mountains. Use the 2024 acoustic survey results to estimate the subsampling effect.
+
+Have two ways of considering this:
+
+ * Number of territories surveyed
+ * Number of listening spots surveyed (each listening post can cover multiple territories)
+
+# Method
+
+ * For each territory surveyed, have a number of birds detected and number from ground survey (`r results_file_2024`)
+ * Select a proportion of the total territories sampled, and calculate proportion of birds detected. 
+ * Repeat this `r n_iter` times to get estimate of proportion detected vs proportion of territories sampled
+ * Calculate the absolute error in the population estimate (compared to ground survey), and also the 95% precision (1 - 95th percentile of absolute error distribution = minimum precision expected for 95% of subsampled surveys at given sampling intensity).
+ * Follow this process for both the number of territories surveyed, and for listening spots used.
+ 
+ Methods summary for a paper:
+ 
+ ```
+ A Monte Carlo sensitivity analysis was conducted by repeatedly subsampling 30-100% of territories without replacement. For each subsample, weighted detection accuracy was calculated as the total number of responding birds divided by the total number of birds known to be present. Absolute error was calculated as the difference between the subsample estimate and the estimate derived from the complete dataset. For each sampling proportion, the median absolute error and the 95th percentile absolute error were used to quantify the precision of the detection accuracy estimate.
+ ```
+
+# Data
+
+
+Read data:
+
+```{r}
+#| label: read_data
+#| code-summary: "Read data"
+
+
+# library(Microsoft365R)
+# 
+# # Authenticate with Microsoft 365
+# site <- get_sharepoint_site(takahe_sharepoint)
+# 
+# # Access the document library
+# doclib <- site$get_drive()
+# 
+# # Download the file
+# file <- doclib$get_item("Shared Documents/yourfile.xlsx")
+# file$download(dest = "yourfile.xlsx")
+
+# Read the results file and combine all tabs into one dataframe
+
+# Get all sheet names
+sheet_names <- excel_sheets(results_file_2024)
+
+# Read and combine all sheets into one data frame
+# Convert all columns to character to enable binding different column types
+ac2024 <- map_dfr(sheet_names, ~ read_excel(results_file_2024, sheet = .x) %>%
+                     mutate(across(everything(), as.character),
+                            block = .x)) %>%
+
+  janitor::clean_names(.)
+
+cat(sprintf("Read %d rows from %d sheets in %s\n", nrow(ac2024), length(sheet_names), results_file_2024 ))
+```
+
+Tidy data:
+
+ * For multiple results from the same territory, take maximum of birds responded.
+
+```{r}
+#| label: tidy_data
+#| 
+# Convert to numeric:
+ac2024 <- ac2024 %>%
+  mutate(across(c(birds_responded, distance_m, birds_surveyed), as.numeric))
+
+# Maximum number of birds recorded in each territory
+ac2024_max <- ac2024 %>%
+  group_by(territory) %>%
+  slice_max(order_by = birds_responded, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+```
+
+# Sensitivity by sampling territories
+
+First look at error in population estimate by block, then across all blocks.
+
+## Error by block
+
+```{r}
+#| label: territory_block_calc
+#| code-summary: "Calculate sensitivity by sampling territories"
+
+# Prepare data
+acc_dat <- ac2024_max %>%
+  mutate(
+    birds_responded = as.numeric(birds_responded),
+    birds_surveyed = as.numeric(birds_surveyed)
+  ) %>%
+  filter(
+    !is.na(birds_responded),
+    !is.na(birds_surveyed),
+    birds_surveyed > 0,
+    !is.na(block)
+  )
+
+props <- seq(0.30, 1.00, by = 0.05)
+n_iter <- 1000
+
+set.seed(123)
+tic()
+sensitivity_results <- map_dfr(props, function(p) {
+
+  map_dfr(seq_len(n_iter), function(i) {
+
+    sampled <- acc_dat %>%
+      group_by(block) %>%
+      group_modify(~ {
+        slice_sample(
+          .x,
+          n = max(1, round(nrow(.x) * p))
+        )
+      }) %>%
+      ungroup()
+
+    sampled %>%
+      group_by(block) %>%
+      summarise(
+        accuracy = sum(birds_responded) / sum(birds_surveyed),
+        territories_sampled = n(),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        proportion = p,
+        iteration = i
+      )
+
+  })
+
+})
+toc()
+# Summarise output:
+sensitivity_summary <- sensitivity_results %>%
+  group_by(block, proportion) %>%
+  summarise(
+    mean_accuracy = mean(accuracy),
+    sd_accuracy = sd(accuracy),
+    lower_95 = quantile(accuracy, 0.025),
+    upper_95 = quantile(accuracy, 0.975),
+    .groups = "drop"
+  )
+
+# Add  absolute error relative to the full dataset estimate. That directly answers: "How much accuracy do I lose if I only survey 50% of territories?"
+
+full_accuracy <- acc_dat %>%
+  group_by(block) %>%
+  summarise(
+    full_accuracy = sum(birds_responded) / sum(birds_surveyed),
+    .groups = "drop"
+  )
+
+sensitivity_summary <- sensitivity_summary %>%
+  left_join(full_accuracy, by = "block") %>%
+  mutate(
+    abs_error = abs(mean_accuracy - full_accuracy)
+  )
+
+```
+
+
+Show absolute error from the survey estimate: if sampled 50% of territories, how far from true total will the acoustic estimate be?
+
+ * 1000 Monte Carlo estimates
+ * calculate error for each run
+ * summarise distribution of errors
+
+
+```{r}
+error_summary <- sensitivity_results %>%
+  left_join(full_accuracy, by = "block") %>%
+  mutate(
+    abs_error = abs(accuracy - full_accuracy)
+  ) %>%
+  group_by(block, proportion) %>%
+  summarise(
+    median_error = median(abs_error),
+    p95_error = quantile(abs_error, 0.95),
+    .groups = "drop"
+  )
+
+ggplot(error_summary,
+       aes(proportion * 100, median_error)) +
+  geom_line(linewidth = 1) +
+  geom_line(aes(y = p95_error),
+            linetype = "dashed") +
+  facet_wrap(~block) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(
+    x = "% territories sampled",
+    y = "Absolute error from full estimate",
+    title = "Effect of reducing sampling effort",
+    caption = "Solid line shows median error; dashed shows 95th percentile of error"
+  ) +
+  theme_pubr()
+```
+
+
+
+## Error across all blocks
+
+```{r}
+#| label: territory_overall_calc_sens_plot
+#| code-summary: "Plot sensitivity by sampling territories over all blocks"
+
+# Prepare data
+acc_dat <- ac2024_max %>%
+  mutate(
+    birds_responded = as.numeric(birds_responded),
+    birds_surveyed = as.numeric(birds_surveyed)
+  ) %>%
+  filter(
+    !is.na(birds_responded),
+    !is.na(birds_surveyed),
+    birds_surveyed > 0
+  )
+
+# Proportions to test
+props <- seq(0.30, 1.00, by = 0.05)
+
+
+set.seed(123)
+
+overall_sensitivity <- map_dfr(props, function(p) {
+
+  map_dfr(seq_len(n_iter), function(i) {
+
+    sampled <- acc_dat %>%
+      slice_sample(
+        n = max(1, round(nrow(acc_dat) * p)),
+        replace = FALSE
+      )
+
+    tibble(
+      proportion = p,
+      iteration = i,
+      territories_sampled = nrow(sampled),
+      birds_responded = sum(sampled$birds_responded),
+      birds_surveyed = sum(sampled$birds_surveyed),
+      accuracy = sum(sampled$birds_responded) /
+                 sum(sampled$birds_surveyed)
+    )
+
+  })
+
+})
+
+# Calculate error:
+overall_full_accuracy <- sum(acc_dat$birds_responded) /
+                 sum(acc_dat$birds_surveyed)
+
+overall_error_summary <- overall_sensitivity %>%
+  mutate(
+    abs_error = abs(accuracy - overall_full_accuracy)
+  ) %>%
+  group_by(proportion) %>%
+  summarise(
+    median_error = median(abs_error),
+    mean_error = mean(abs_error),
+    p95_error = quantile(abs_error, 0.95),
+    lower_95 = quantile(abs_error, 0.025),
+    upper_95 = quantile(abs_error, 0.975),
+    precision_95 = 1 - quantile(abs_error, 0.95),
+    precision_median = 1 - median(abs_error),
+    precision_lower = 1 - quantile(abs_error, 0.975),
+    precision_upper = 1 - quantile(abs_error, 0.025),
+    .groups = "drop"
+  )
+
+overall_full_accuracy
+summary(overall_sensitivity$accuracy)
+sd(overall_sensitivity$accuracy)
+```
+
+Plot absolute error:
+
+```{r}
+#| label: territory_overall_abs_err
+#| code-summary: "Overall absolute error by sampling territories"
+
+ggplot(overall_error_summary,
+       aes(x = proportion * 100,
+           y = median_error)) +
+  geom_ribbon(
+    aes(
+      ymin = lower_95,
+      ymax = upper_95
+    ),
+    fill = "#6C90B9",
+    alpha = 0.25
+  ) +
+  geom_line(
+    linewidth = 1.2,
+    colour = "#6C90B9"
+  ) +
+  geom_line(
+    aes(y = p95_error),
+    linetype = "dashed",
+    colour = "firebrick",
+    linewidth = 1
+  ) +
+  scale_x_continuous(
+    breaks = seq(30, 100, 10)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "Sensitivity of Weighted Detection Accuracy",
+    x = "Percentage of Territories Sampled",
+    y = "Absolute Error from survey estimate",
+    caption = "Blue line = median error; dashed red line = 95th percentile error"
+  ) +
+  theme_pubr()
+```
+
+Plot precision: when sampling a proportion of the territories, 95% of estimates are at leaset M% as precise as full survey estimate.
+
+```{r}
+#| label: territory_overall_precision
+#| code-summary: "Overall precision by sampling territories"
+ggplot(
+  overall_error_summary,
+  aes(
+    x = proportion * 100,
+    y = precision_median
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = precision_lower,
+      ymax = precision_upper
+    ),
+    fill = "#6C90B9",
+    alpha = 0.25
+  ) +
+  geom_line(
+    colour = "#6C90B9",
+    linewidth = 1.2
+  ) +
+  scale_x_continuous(
+    breaks = seq(30, 100, 10)
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0.85, 1)
+  ) +
+  labs(
+    title = "Precision of Acoustic Detection Accuracy Estimates",
+    x = "Territories Sampled (%)",
+    y = "Precision Relative to Full Estimate"
+  ) +
+  theme_pubr()
+```
+
+
+
+# Sensitivity by listening locations

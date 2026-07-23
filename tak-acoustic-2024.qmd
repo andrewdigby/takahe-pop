@@ -9,7 +9,7 @@ knitr:
     fig.path: "figure/NAME"
     dev: 'png'
 execute:
-  echo: false
+  echo: true
   warning: false
   message: false
   cache: true
@@ -40,7 +40,8 @@ library(tidyverse)
 packages <- c(
 "readxl", "lubridate", "purrr",
 "ggplot2", "ggpubr",
-"yardstick" # for contingency stats
+"yardstick", # for contingency stats
+"binom" # confidence intervals
 )
 
 suppressMessages(walk(packages, library, character.only = T))
@@ -241,44 +242,86 @@ ggplot(lblock_metrics, aes(x = block, y = value, fill = block, colour = block)) 
 
 ```
 
-Proportional accuracy by block
+
+Proportional accuracy by block using weighted (bird-level) accuracy: sum(birds_responded) / sum(birds_surveyed) rather than mean(birds_responded / birds_surveyed)
 
 ```{r}
-#| label: prop_acc_block
-#| code-summary: "Proportional accuracy by block"
+#| label: prop_acc_block_weight
+#| code-summary: "Proportional accuracy by block using weighted accuracy"
 #| fig-height: 8
 
 
-# Calculate proportional accuracy and standard deviation
-ac2024_accuracy <- ac2024_max %>%
+
+ac2024_accuracy_wt <- ac2024_max %>%
   mutate(
     birds_responded = as.numeric(birds_responded),
     birds_surveyed = as.numeric(birds_surveyed)
   ) %>%
-  filter(!is.na(birds_responded), !is.na(birds_surveyed), birds_surveyed > 0, !is.na(block)) %>%
-  mutate(
-    accuracy = birds_responded / birds_surveyed
+  filter(
+    !is.na(birds_responded),
+    !is.na(birds_surveyed),
+    birds_surveyed > 0,
+    !is.na(block)
   ) %>%
   group_by(block) %>%
   summarise(
-    mean_accuracy = mean(accuracy, na.rm = TRUE),
-    sd_accuracy = sd(accuracy, na.rm = TRUE),
-    n = n(),
-    se_accuracy = sd_accuracy / sqrt(n)
+    birds_responded_total = sum(birds_responded),
+    birds_surveyed_total = sum(birds_surveyed),
+    accuracy = birds_responded_total / birds_surveyed_total,
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    ci = list(
+      binom.confint(
+        birds_responded_total,
+        birds_surveyed_total,
+        method = "wilson"
+      )
+    ),
+    lower_ci = ci$lower,
+    upper_ci = ci$upper
+  ) %>%
+  select(-ci)
+
+ggplot(ac2024_accuracy_wt, aes(x = block, y = accuracy)) +
+  geom_col(fill = "#6C90B9") +
+  geom_pointrange(
+    aes(
+      ymin = lower_ci,
+      ymax = upper_ci
+    ),
+    width = 0.2,
+    colour = "darkblue"
+  ) +
+  # Add number surveyed
+geom_text(
+  aes(
+    label = paste0("Survey n = ", birds_surveyed_total),
+    y = pmin(upper_ci + 0.04, 1.08)
+  ),
+  size = 3
+) +
+  labs(
+    title = "Weighted Accuracy by Block",
+    x = "Block",
+    y = "Detection Accuracy (Birds Responded / Birds Surveyed)"
+  ) +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed",
+    colour = "grey50"
+  ) +
+  theme_pubr() +
+  theme(
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
   )
 
-# Plot with error bars (standard deviation)
-ggplot(ac2024_accuracy, aes(x = block, y = mean_accuracy)) +
-  geom_col(fill = "#6C90B9") +
-  geom_pointrange(aes(ymin = mean_accuracy - sd_accuracy, ymax = mean_accuracy + sd_accuracy),
-                width = 0.2, color = "darkblue") +
-  labs(title = "Proportional Accuracy by Block",
-       x = "Block", y = "Mean Accuracy (Birds Responded / Birds Surveyed)") +
-  ylim(0, 1.1) +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "gray") +
-  theme_pubr() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
 
 ```
-
 
