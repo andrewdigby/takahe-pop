@@ -38,7 +38,7 @@ editor:
 
 library(tidyverse)
 packages <- c(
-"readxl", "lubridate", "purrr",
+"readxl", "lubridate", "purrr", "conflicted",
 "ggplot2", "ggpubr",
 "yardstick", # for contingency stats
 "binom" # confidence intervals
@@ -47,10 +47,9 @@ packages <- c(
 suppressMessages(walk(packages, library, character.only = T))
 
 # Utilities:
-library(conflicted)
-conflicts_prefer(dplyr::select(),
-                 dplyr::filter(),
-                 dplyr::lag())
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::lag)
 
 theme_set(theme_minimal(base_size = 16))
 theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) # remove gridlines

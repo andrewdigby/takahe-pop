@@ -264,6 +264,11 @@ Show absolute error from the survey estimate: if sampled 50% of territories, how
 
 
 ```{r}
+#| label: territory_block_abserr_plot
+#| code-summary: "Plot absolute error from sampling territories"
+#| fig-height: 10
+#| fig-width: 12
+#|  
 error_summary <- sensitivity_results %>%
   left_join(full_accuracy, by = "block") %>%
   mutate(
@@ -278,16 +283,17 @@ error_summary <- sensitivity_results %>%
 
 ggplot(error_summary,
        aes(proportion * 100, median_error)) +
-  geom_line(linewidth = 1) +
+  geom_line(linewidth = 1.2, colour = "#6C90B9") +
   geom_line(aes(y = p95_error),
-            linetype = "dashed") +
+            linetype = "dashed",
+            colour = 'firebrick') +
   facet_wrap(~block) +
   scale_y_continuous(labels = scales::percent) +
   labs(
     x = "% territories sampled",
     y = "Absolute error from full estimate",
     title = "Effect of reducing sampling effort",
-    caption = "Solid line shows median error; dashed shows 95th percentile of error"
+    caption = "Blue line = median error; dashed red line = 95th percentile error"
   ) +
   theme_pubr()
 ```
