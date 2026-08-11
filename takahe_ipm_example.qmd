@@ -19,7 +19,7 @@ format:
       - left=30mm
 execute:
   cache: false
-  echo: false
+  echo: true
   warning: false
   message: false
   freeze: true
@@ -38,7 +38,8 @@ library(tidyverse)
 
 packages <- c("nimble", 
               "ggplot2", 
-              "coda")
+              "coda",
+              "tictoc")
 walk(packages, library, character.only = T)
 
 theme_set(theme_minimal())
@@ -49,7 +50,7 @@ theme_set(theme_minimal())
 Integrated population model demonstration for the Whakatipu takahe, using simulated data. Uses `nimble` package.
 
 ## Structure
-
+```
 Population process:
     N[t+1] = S[t] * N[t] + R[t]
     where R[t] = λ[t] * nests[t] * J[t]
@@ -70,7 +71,9 @@ Juvenile survival:
 Recruitment:
     R[t] = λ[t] * nests[t] * J[t]
     nests[t] = total nests (estimated from breeding pairs)
+```
 
+This assumes that the nesting pairs monitored are representative of the population. If this is true, it does not matter that different pairs are monitored each year.
 
 # Data
 
@@ -86,12 +89,27 @@ Use example parameters to simulate data.
 # Parameters
 n_years <- 5
 n_adults <- 50
-n_nests <- 8 # nests monitored
+# n_nests <- 8 # nests monitored
 true_S <- rep(0.85, n_years-1)   # adult survival
 true_J <- rep(0.5, n_years-1)    # juvenile survival
 true_lambda <- rep(2, n_years-1) # chicks per nest
 true_N <- numeric(n_years)
 true_N[1] <- 50
+
+# Total breeding pairs (estimated)
+nests <- c(25, 28, 31, 29)
+
+# Monitored nests
+m <- c(5, 8, 12, 6)
+
+year_nest <- c(
+  rep(1, m[1]),
+  rep(2, m[2]),
+  rep(3, m[3]),
+  rep(4, m[4])
+)
+
+n_nests_total <- length(year_nest)
 ```
 
 ## Simulate data
@@ -108,8 +126,9 @@ true_N[1] <- 50
 set.seed(123)
 # Population process
 for(t in 1:(n_years-1)) {
-  R <- true_lambda[t] * n_nests * true_J[t]
-  true_N[t+1] <- rpois(1, true_N[t]*true_S[t] + R)
+  R <- true_lambda[t] * nests[t] * true_J[t]
+  true_N[t+1] <- rpois(1,true_N[t] * true_S[t] + R
+  )
 }
 
 # Telemetry survival data
@@ -119,18 +138,23 @@ for(t in 1:(n_years-1)) {
 }
 
 # Nest productivity and yearling data
-chicks <- numeric(n_nests*(n_years-1))
-yearlings <- numeric(n_nests*(n_years-1))
-nest_year_index <- numeric(n_nests*(n_years-1))
+total_obs <- sum(m)
+
+chicks <- numeric(total_obs)
+yearlings <- numeric(total_obs)
+nest_year_index <- numeric(total_obs)
+
 idx <- 1
 for(t in 1:(n_years-1)) {
-  for(i in 1:n_nests) {
+  for(i in 1:m[t]) {
     nest_year_index[idx] <- t
-    chicks[idx] <- rpois(1, true_lambda[t])
-    yearlings[idx] <- rbinom(1, chicks[idx], true_J[t])
+    chicks[idx] <- rpois(1,true_lambda[t]    )
+    yearlings[idx] <- rbinom(1,chicks[idx],true_J[t])
     idx <- idx + 1
   }
 }
+
+
 
 # Counts
 count <- true_N
@@ -150,36 +174,49 @@ Define IPM in Nimble
 # Define IPM in NIMBLE
 # ---------------------------
 ipm_code <- nimbleCode({
+
+  # Parameters
   for(t in 1:(n_years-1)) {
-    S[t] ~ dbeta(2, 2)          # Adult survival
-    J[t] ~ dbeta(2, 2)          # Juvenile survival
-    lambda[t] ~ dnorm(2, 1)     # Mean chicks per nest
+    S[t] ~ dbeta(2, 2)
+    J[t] ~ dbeta(2, 2)
+    lambda[t] ~ dgamma(2, 1)
   }
-  
+
+  # Initial abundance
   N[1] ~ dpois(init_N)
+
+  # Population process
   for(t in 1:(n_years-1)) {
+    # nests[t] = total breeding pairs in year t
     R[t] <- lambda[t] * nests[t] * J[t]
-    N[t+1] ~ dpois(N[t]*S[t] + R[t])
+    N[t+1] ~ dpois(N[t] * S[t] + R[t])
   }
-  
-  # Adult survival likelihood
+
+  # Adult survival data
   for(i in 1:n_adults) {
     for(t in 1:(n_years-1)) {
       y[i,t] ~ dbern(S[t])
     }
   }
-  
-  # Nest productivity and juvenile survival
+
+  # Nest productivity data
+  # year_nest[i] indicates which year nest i belongs to
   for(i in 1:n_nests_total) {
-    chicks[i] ~ dpois(lambda[year_nest[i]])
-    yearlings[i] ~ dbinom(J[year_nest[i]], chicks[i])
+
+    #chicks[i] ~ dpois(lambda[year_nest[i]])
+
+    yearlings[i] ~ dbinom(
+      prob = J[year_nest[i]],
+      size = chicks[i]
+    )
   }
-  
+
   # Count data
   for(t in 1:n_years) {
     count[t] ~ dpois(N[t])
   }
 })
+  
 ```
 
 
@@ -195,28 +232,39 @@ Prepare data and constants
 # ---------------------------
 # Prepare data and constants
 # ---------------------------
+cat("### Constants ###\n")
+
 constants <- list(
   n_years = n_years,
   n_adults = n_adults,
   n_nests_total = length(chicks),
-  nests = rep(n_nests, n_years-1),
-  year_nest = nest_year_index
+  nests = nests,              # breeding pairs by year
+  year_nest = as.integer(year_nest),
+  init_N = count[1]
 )
+
+constants
+
+cat("### Data ###\n")
 
 data <- list(
   y = adult_survival,
   chicks = chicks,
   yearlings = yearlings,
-  count = count,
-  init_N = count[1]
+  count = count
+  #init_N = count[1]
 )
+data
+
+cat("### Inits ###\n")
 
 inits <- list(
-  S = rep(0.8, n_years-1),
-  J = rep(0.5, n_years-1),
-  lambda = rep(2, n_years-1),
+  S = true_S, # rep(0.8, n_years-1),
+  J = true_J, # rep(0.5, n_years-1),
+  lambda = true_lambda, # rep(2, n_years-1),
   N = count
 )
+inits
 ```
 
 
@@ -229,6 +277,7 @@ inits <- list(
 # ---------------------------
 # Step 4: Build and run the model
 # ---------------------------
+tic()
 ipm_model <- nimbleModel(code = ipm_code, data = data, constants = constants, inits = inits)
 ipm_conf <- configureMCMC(ipm_model, monitors = c("S", "J", "lambda", "N"))
 ipm_mcmc <- buildMCMC(ipm_conf)
@@ -236,6 +285,7 @@ ipm_mcmc <- buildMCMC(ipm_conf)
 Cmodel <- compileNimble(ipm_model)
 Cmcmc <- compileNimble(ipm_mcmc, project = ipm_model)
 samples <- runMCMC(Cmcmc, niter = 10000, nburnin = 2000, thin = 10)
+toc()
 ```
 
 # Results
