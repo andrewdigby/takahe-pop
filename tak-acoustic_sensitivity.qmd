@@ -83,7 +83,7 @@ render_table <- function(df) {
 takahe_sharepoint <- 'https://docnz.sharepoint.com/:x:/t/TakaheRecovery/'
 
 results_file_2024 <- sprintf('/Users/%s/Library/CloudStorage/OneDrive-DepartmentofConservation/Takahe Team/Takahe_Shared_Files/Research/Acoustic survey trials/Murchies Acoustic Survey Trial Data.xlsx', Sys.getenv("USER"))
-
+route_file <- sprintf('/Users/%s/Library/CloudStorage/OneDrive-DepartmentofConservation/Takahe Team/Takahe_Shared_Files/Research/Acoustic survey trials/Acoustic Survey Proposed .xlsx', Sys.getenv("USER"))
 
 n_iter <- 5000
 
@@ -96,7 +96,7 @@ Conduct a sensitivity analysis to assess the impact of sampling a subset of terr
 Have two ways of considering this:
 
  * Number of territories surveyed
- * Number of listening spots surveyed (each listening post can cover multiple territories)
+ * Number of routes surveyed (each route covers multiple territories)
 
 # Method
 
@@ -104,7 +104,7 @@ Have two ways of considering this:
  * Select a proportion of the total territories sampled, and calculate proportion of birds detected. 
  * Repeat this `r n_iter` times to get estimate of proportion detected vs proportion of territories sampled
  * Calculate the absolute error in the population estimate (compared to ground survey), and also the 95% precision (1 - 95th percentile of absolute error distribution = minimum precision expected for 95% of subsampled surveys at given sampling intensity).
- * Follow this process for both the number of territories surveyed, and for listening spots used.
+ * Follow this process for both the number of territories surveyed, and for routes used.
  
  Methods summary for a paper:
  
@@ -114,8 +114,8 @@ Have two ways of considering this:
 
 # Data
 
-
-Read data:
+## Acoustic survey data 
+Read 2024 acoustic survey data:
 
 ```{r}
 #| label: read_data
@@ -168,6 +168,26 @@ ac2024_max <- ac2024 %>%
   ungroup()
 
 ```
+
+## Route data
+
+Read proposed route data: this gives which territory is in which route. 
+
+```{r}
+#| label: read_routes
+
+routes <- readxl::read_excel(route_file) %>%
+  janitor::clean_names()
+
+# Fill down Survey type, name, effort and acoustic points per group
+routes <- routes %>%
+  fill(c(survey_type, name, effort_hrs, no_acoustic_points),.direction = 'down')
+
+# Add routes to territory survey results 
+
+ac2024_max <- left_join(ac2024_max, routes, by = 'territory')
+```
+
 
 # Sensitivity by sampling territories
 
@@ -458,4 +478,88 @@ ggplot(
 
 
 
-# Sensitivity by listening locations
+# Sensitivity by routes
+
+Now calculate sensitivity to randomly selecting routes.
+
+## Error by route
+
+```{r}
+#| label: route_block_calc
+#| code-summary: "Calculate sensitivity by sampling groups"
+
+# Prepare data
+acc_dat <- ac2024_max %>%
+  mutate(
+    birds_responded = as.numeric(birds_responded),
+    birds_surveyed = as.numeric(birds_surveyed)
+  ) %>%
+  filter(
+    !is.na(birds_responded),
+    !is.na(birds_surveyed),
+    birds_surveyed > 0,
+    !is.na(route_group)
+  )
+
+props <- seq(0.30, 1.00, by = 0.05)
+n_iter <- 10
+
+set.seed(123)
+tic()
+sensitivity_results <- map_dfr(props, function(p) {
+
+  map_dfr(seq_len(n_iter), function(i) {
+
+    sampled <- acc_dat %>%
+      group_by(route_group) %>%
+      group_modify(~ {
+        slice_sample(
+          .x,
+          n = max(1, round(nrow(.x) * p))
+        )
+      }) %>%
+      ungroup()
+
+    sampled %>%
+      group_by(route_group) %>%
+      summarise(
+        accuracy = sum(birds_responded) / sum(birds_surveyed),
+        territories_sampled = n(),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        proportion = p,
+        iteration = i
+      )
+
+  })
+
+})
+toc()
+# Summarise output:
+sensitivity_summary <- sensitivity_results %>%
+  group_by(block, proportion) %>%
+  summarise(
+    mean_accuracy = mean(accuracy),
+    sd_accuracy = sd(accuracy),
+    lower_95 = quantile(accuracy, 0.025),
+    upper_95 = quantile(accuracy, 0.975),
+    .groups = "drop"
+  )
+
+# Add  absolute error relative to the full dataset estimate. That directly answers: "How much accuracy do I lose if I only survey 50% of territories?"
+
+full_accuracy <- acc_dat %>%
+  group_by(block) %>%
+  summarise(
+    full_accuracy = sum(birds_responded) / sum(birds_surveyed),
+    .groups = "drop"
+  )
+
+sensitivity_summary <- sensitivity_summary %>%
+  left_join(full_accuracy, by = "block") %>%
+  mutate(
+    abs_error = abs(mean_accuracy - full_accuracy)
+  )
+
+```
