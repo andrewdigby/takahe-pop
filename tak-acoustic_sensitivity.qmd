@@ -6,7 +6,7 @@ toc: true
 number-sections: true
 knitr:
   opts_chunk:
-    fig.path: "figure/NAME"
+    fig.path: "figure/acoustic_sensitivity/"
     dev: 'png'
 execute:
   echo: true
@@ -48,9 +48,9 @@ suppressMessages(walk(packages, library, character.only = T))
 
 # Utilities:
 library(conflicted)
-conflicts_prefer(dplyr::select(),
-                 dplyr::filter(),
-                 dplyr::lag())
+conflicts_prefer(dplyr::select,
+                 dplyr::filter,
+                 dplyr::lag)
 
 theme_set(theme_minimal(base_size = 16))
 theme_update(panel.grid.major = element_blank(), panel.grid.minor = element_blank()) # remove gridlines
@@ -100,22 +100,26 @@ Have two ways of considering this:
 
 # Method
 
+
  * For each territory surveyed, have a number of birds detected and number from ground survey (`r results_file_2024`)
- * Select a proportion of the total territories sampled, and calculate proportion of birds detected. 
- * Repeat this `r n_iter` times to get estimate of proportion detected vs proportion of territories sampled
+ * Select a proportion of the total territories (or routes) sampled, and calculate proportion of birds detected. 
+ * Repeat this `r n_iter` times to get estimate of proportion detected vs proportion of territories/routes sampled
  * Calculate the absolute error in the population estimate (compared to ground survey), and also the 95% precision (1 - 95th percentile of absolute error distribution = minimum precision expected for 95% of subsampled surveys at given sampling intensity).
- * Follow this process for both the number of territories surveyed, and for routes used.
+ * Follow this process for
+    * sampling territories surveyed within each block
+    * sampling territories across all blocks
+    * sampling routes
  
  Methods summary for a paper:
  
  ```
- A Monte Carlo sensitivity analysis was conducted by repeatedly subsampling 30-100% of territories without replacement. For each subsample, weighted detection accuracy was calculated as the total number of responding birds divided by the total number of birds known to be present. Absolute error was calculated as the difference between the subsample estimate and the estimate derived from the complete dataset. For each sampling proportion, the median absolute error and the 95th percentile absolute error were used to quantify the precision of the detection accuracy estimate.
+ A Monte Carlo sensitivity analysis was conducted by repeatedly subsampling 30-100% of territories or routes without replacement, with `r n_iter` iterations. For each subsample, weighted detection accuracy was calculated as the total number of responding birds divided by the total number of birds known to be present. Absolute error was calculated as the difference between the subsample estimate and the estimate derived from the complete dataset. For each sampling proportion, the median absolute error and the 95th percentile absolute error were used to quantify the precision of the detection accuracy estimate.
  ```
 
 # Data
 
 ## Acoustic survey data 
-Read 2024 acoustic survey data:
+Read 2024 acoustic survey data from `r results_file_2024`:
 
 ```{r}
 #| label: read_data
@@ -171,7 +175,7 @@ ac2024_max <- ac2024 %>%
 
 ## Route data
 
-Read proposed route data: this gives which territory is in which route. 
+Read proposed route data: this gives which territory is in which route. Read from `r route_file`.
 
 ```{r}
 #| label: read_routes
@@ -181,11 +185,12 @@ routes <- readxl::read_excel(route_file) %>%
 
 # Fill down Survey type, name, effort and acoustic points per group
 routes <- routes %>%
+  group_by(route_group) %>%
   fill(c(survey_type, name, effort_hrs, no_acoustic_points),.direction = 'down')
 
 # Add routes to territory survey results 
 
-ac2024_max <- left_join(ac2024_max, routes, by = 'territory')
+ac2024_max <- left_join(ac2024_max, routes, by = 'territory', suffix = c('', 'rte'))
 ```
 
 
@@ -198,7 +203,6 @@ First look at error in population estimate by block, then across all blocks.
 ```{r}
 #| label: territory_block_calc
 #| code-summary: "Calculate sensitivity by sampling territories"
-
 # Prepare data
 acc_dat <- ac2024_max %>%
   mutate(
@@ -213,11 +217,10 @@ acc_dat <- ac2024_max %>%
   )
 
 props <- seq(0.30, 1.00, by = 0.05)
-n_iter <- 1000
 
 set.seed(123)
-tic()
-sensitivity_results <- map_dfr(props, function(p) {
+
+territory_block_sensitivity <- map_dfr(props, function(p) {
 
   map_dfr(seq_len(n_iter), function(i) {
 
@@ -234,8 +237,10 @@ sensitivity_results <- map_dfr(props, function(p) {
     sampled %>%
       group_by(block) %>%
       summarise(
-        accuracy = sum(birds_responded) / sum(birds_surveyed),
         territories_sampled = n(),
+        accuracy =
+          sum(birds_responded) /
+          sum(birds_surveyed),
         .groups = "drop"
       ) %>%
       mutate(
@@ -246,33 +251,50 @@ sensitivity_results <- map_dfr(props, function(p) {
   })
 
 })
-toc()
-# Summarise output:
-sensitivity_summary <- sensitivity_results %>%
-  group_by(block, proportion) %>%
-  summarise(
-    mean_accuracy = mean(accuracy),
-    sd_accuracy = sd(accuracy),
-    lower_95 = quantile(accuracy, 0.025),
-    upper_95 = quantile(accuracy, 0.975),
-    .groups = "drop"
-  )
 
-# Add  absolute error relative to the full dataset estimate. That directly answers: "How much accuracy do I lose if I only survey 50% of territories?"
-
-full_accuracy <- acc_dat %>%
+# Full-survey estimate for each block
+block_full_accuracy <- acc_dat %>%
   group_by(block) %>%
   summarise(
-    full_accuracy = sum(birds_responded) / sum(birds_surveyed),
+    full_accuracy =
+      sum(birds_responded) /
+      sum(birds_surveyed),
     .groups = "drop"
   )
 
-sensitivity_summary <- sensitivity_summary %>%
-  left_join(full_accuracy, by = "block") %>%
+# Error and precision summaries
+territory_block_summary <- territory_block_sensitivity %>%
+  left_join(
+    block_full_accuracy,
+    by = "block"
+  ) %>%
   mutate(
-    abs_error = abs(mean_accuracy - full_accuracy)
-  )
+    abs_error =
+      abs(accuracy - full_accuracy)
+  ) %>%
+  group_by(block, proportion) %>%
+  summarise(
+    median_error = median(abs_error),
+    mean_error = mean(abs_error),
+    p95_error = quantile(abs_error, 0.95),
 
+    error_lower_95 = quantile(abs_error, 0.025),
+    error_upper_95 = quantile(abs_error, 0.975),
+
+    precision_median =
+      1 - median(abs_error),
+
+    precision_95 =
+      1 - quantile(abs_error, 0.95),
+
+    precision_lower =
+      1 - quantile(abs_error, 0.975),
+
+    precision_upper =
+      1 - quantile(abs_error, 0.025),
+
+    .groups = "drop"
+  )
 ```
 
 
@@ -289,30 +311,38 @@ Show absolute error from the survey estimate: if sampled 50% of territories, how
 #| fig-height: 10
 #| fig-width: 12
 #|  
-error_summary <- sensitivity_results %>%
-  left_join(full_accuracy, by = "block") %>%
-  mutate(
-    abs_error = abs(accuracy - full_accuracy)
-  ) %>%
-  group_by(block, proportion) %>%
-  summarise(
-    median_error = median(abs_error),
-    p95_error = quantile(abs_error, 0.95),
-    .groups = "drop"
-  )
-
-ggplot(error_summary,
-       aes(proportion * 100, median_error)) +
-  geom_line(linewidth = 1.2, colour = "#6C90B9") +
-  geom_line(aes(y = p95_error),
-            linetype = "dashed",
-            colour = 'firebrick') +
+ggplot(
+  territory_block_summary,
+  aes(
+    x = proportion * 100,
+    y = median_error
+  )) +
+  geom_ribbon(
+    aes(
+      ymin = error_lower_95,
+      ymax = error_upper_95
+    ),
+    fill = "#6C90B9",
+    alpha = 0.25
+) +
+  geom_line(
+    linewidth = 1.2,
+    colour = "#6C90B9"
+  ) +
+  geom_line(
+    aes(y = p95_error),
+    linetype = "dashed",
+    colour = "firebrick"
+  ) +
   facet_wrap(~block) +
-  scale_y_continuous(labels = scales::percent) +
+  scale_y_continuous(
+    labels = scales::percent
+  ) +
   labs(
-    x = "% territories sampled",
-    y = "Absolute error from full estimate",
-    title = "Effect of reducing sampling effort",
+    title = "Effect of Territory Sampling Effort on Estimate Error",
+    subtitle = "Sampling territories within each block",
+    x = "Territories Sampled (%)",
+    y = "Absolute Error from Full Survey Estimate",
     caption = "Blue line = median error; dashed red line = 95th percentile error"
   ) +
   theme_pubr()
@@ -344,7 +374,7 @@ props <- seq(0.30, 1.00, by = 0.05)
 
 set.seed(123)
 
-overall_sensitivity <- map_dfr(props, function(p) {
+territory_sensitivity <- map_dfr(props, function(p) {
 
   map_dfr(seq_len(n_iter), function(i) {
 
@@ -369,12 +399,12 @@ overall_sensitivity <- map_dfr(props, function(p) {
 })
 
 # Calculate error:
-overall_full_accuracy <- sum(acc_dat$birds_responded) /
+territory_full_accuracy <- sum(acc_dat$birds_responded) /
                  sum(acc_dat$birds_surveyed)
 
-overall_error_summary <- overall_sensitivity %>%
+territory_summary <- territory_sensitivity %>%
   mutate(
-    abs_error = abs(accuracy - overall_full_accuracy)
+    abs_error = abs(accuracy - territory_full_accuracy)
   ) %>%
   group_by(proportion) %>%
   summarise(
@@ -390,9 +420,9 @@ overall_error_summary <- overall_sensitivity %>%
     .groups = "drop"
   )
 
-overall_full_accuracy
-summary(overall_sensitivity$accuracy)
-sd(overall_sensitivity$accuracy)
+territory_full_accuracy
+summary(territory_sensitivity$accuracy)
+sd(territory_sensitivity$accuracy)
 ```
 
 Plot absolute error:
@@ -401,7 +431,7 @@ Plot absolute error:
 #| label: territory_overall_abs_err
 #| code-summary: "Overall absolute error by sampling territories"
 
-ggplot(overall_error_summary,
+ggplot(territory_summary,
        aes(x = proportion * 100,
            y = median_error)) +
   geom_ribbon(
@@ -429,10 +459,11 @@ ggplot(overall_error_summary,
     labels = percent_format(accuracy = 1)
   ) +
   labs(
-    title = "Sensitivity of Weighted Detection Accuracy",
-    x = "Percentage of Territories Sampled",
-    y = "Absolute Error from survey estimate",
-    caption = "Blue line = median error; dashed red line = 95th percentile error"
+  title = "Effect of territory sampling effort on estimate error",
+  subtitle = "Random subsets of territories: agreement with the full-survey acoustic detection estimate",
+  x = "Territories Sampled (%)",
+  y = "Absolute Error from Full Survey Estimate",
+  caption = "Blue line = median error; dashed red line = 95th percentile error; shaded: 2.5-97.5 percentile"
   ) +
   theme_pubr()
 ```
@@ -443,7 +474,7 @@ Plot precision: when sampling a proportion of the territories, 95% of estimates 
 #| label: territory_overall_precision
 #| code-summary: "Overall precision by sampling territories"
 ggplot(
-  overall_error_summary,
+  territory_summary,
   aes(
     x = proportion * 100,
     y = precision_median
@@ -469,24 +500,29 @@ ggplot(
     limits = c(0.85, 1)
   ) +
   labs(
-    title = "Precision of Acoustic Detection Accuracy Estimates",
-    x = "Territories Sampled (%)",
-    y = "Precision Relative to Full Estimate"
+  title = "Effect of territory sampling effort on estimate precision",
+  subtitle = "Agreement with the full-survey acoustic detection estimate",
+  x = "Territories Sampled (%)",
+  y = "Agreement with Full Survey Estimate"
   ) +
   theme_pubr()
 ```
 
 
 
-# Sensitivity by routes
 
-Now calculate sensitivity to randomly selecting routes.
 
-## Error by route
+# Sensitivity by sampling route
 
+ 1. Identify all unique route_groups.
+ 2. Sample a proportion of those routes.
+ 3. Keep all territories belonging to the chosen routes.
+ 4. Calculate the overall accuracy.
+ 5. Compare that estimate to the full dataset accuracy.
+ 
 ```{r}
-#| label: route_block_calc
-#| code-summary: "Calculate sensitivity by sampling groups"
+#| label: route_overall_calc_sens_plot
+#| code-summary: "Plot sensitivity by sampling \routes"
 
 # Prepare data
 acc_dat <- ac2024_max %>%
@@ -502,64 +538,152 @@ acc_dat <- ac2024_max %>%
   )
 
 props <- seq(0.30, 1.00, by = 0.05)
-n_iter <- 10
-
 set.seed(123)
-tic()
-sensitivity_results <- map_dfr(props, function(p) {
+
+# Full-survey estimate
+route_full_accuracy <-
+  sum(acc_dat$birds_responded) /
+  sum(acc_dat$birds_surveyed)
+
+# Route-level sensitivity analysis
+route_sensitivity <- map_dfr(props, function(p) {
 
   map_dfr(seq_len(n_iter), function(i) {
 
-    sampled <- acc_dat %>%
-      group_by(route_group) %>%
-      group_modify(~ {
-        slice_sample(
-          .x,
-          n = max(1, round(nrow(.x) * p))
+    sampled_routes <- acc_dat %>%
+      distinct(route_group) %>%
+      slice_sample(
+        n = max(
+          1,
+          round(n_distinct(acc_dat$route_group) * p)
         )
-      }) %>%
-      ungroup()
-
-    sampled %>%
-      group_by(route_group) %>%
-      summarise(
-        accuracy = sum(birds_responded) / sum(birds_surveyed),
-        territories_sampled = n(),
-        .groups = "drop"
-      ) %>%
-      mutate(
-        proportion = p,
-        iteration = i
       )
+
+    sampled_dat <- acc_dat %>%
+      semi_join(
+        sampled_routes,
+        by = "route_group"
+      )
+
+    tibble(
+      proportion = p,
+      iteration = i,
+      routes_sampled = n_distinct(sampled_dat$route_group),
+      territories_sampled = nrow(sampled_dat),
+      birds_responded = sum(sampled_dat$birds_responded),
+      birds_surveyed = sum(sampled_dat$birds_surveyed),
+      accuracy =
+        sum(sampled_dat$birds_responded) /
+        sum(sampled_dat$birds_surveyed)
+    )
 
   })
 
 })
-toc()
-# Summarise output:
-sensitivity_summary <- sensitivity_results %>%
-  group_by(block, proportion) %>%
-  summarise(
-    mean_accuracy = mean(accuracy),
-    sd_accuracy = sd(accuracy),
-    lower_95 = quantile(accuracy, 0.025),
-    upper_95 = quantile(accuracy, 0.975),
-    .groups = "drop"
-  )
 
-# Add  absolute error relative to the full dataset estimate. That directly answers: "How much accuracy do I lose if I only survey 50% of territories?"
-
-full_accuracy <- acc_dat %>%
-  group_by(block) %>%
-  summarise(
-    full_accuracy = sum(birds_responded) / sum(birds_surveyed),
-    .groups = "drop"
-  )
-
-sensitivity_summary <- sensitivity_summary %>%
-  left_join(full_accuracy, by = "block") %>%
+# Error summaries
+route_summary <- route_sensitivity %>%
   mutate(
-    abs_error = abs(mean_accuracy - full_accuracy)
+    abs_error = abs(accuracy - route_full_accuracy)
+  ) %>%
+  group_by(proportion) %>%
+  summarise(
+    median_error = median(abs_error),
+    mean_error = mean(abs_error),
+    p95_error = quantile(abs_error, 0.95),
+
+    lower_95 = quantile(abs_error, 0.025),
+    upper_95 = quantile(abs_error, 0.975),
+
+    precision_median = 1 - median(abs_error),
+    precision_95 = 1 - quantile(abs_error, 0.95),
+
+    precision_lower = 1 - quantile(abs_error, 0.975),
+    precision_upper = 1 - quantile(abs_error, 0.025),
+
+    .groups = "drop"
   )
 
 ```
+ 
+Error plot:
+```{r}
+#| label: route_abs_error_plot
+
+ggplot(
+  route_summary,
+  aes(
+    x = proportion * 100,
+    y = median_error
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = lower_95,
+      ymax = upper_95
+    ),
+    fill = "#6C90B9",
+    alpha = 0.25
+  ) +
+  geom_line(
+    linewidth = 1.2,
+    colour = "#6C90B9"
+  ) +
+  geom_line(
+    aes(y = p95_error),
+    linetype = "dashed",
+    colour = "firebrick"
+  ) +
+  scale_y_continuous(
+    labels = scales::percent
+  ) +
+  labs(
+    title = "Effect of Route sampling effort on estimate error",
+    subtitle = "Random subsets of route groups: agreement with the full-survey acoustic detection estimate",
+    x = "Routes sampled (%)",
+    y = "Absolute error from full survey estimate",
+      caption = "Blue line = median error; dashed red line = 95th percentile error; shaded: 2.5-97.5 percentile"
+  ) +
+  theme_pubr()
+```
+Precision plot:
+
+```{r}
+#| label: route_precision_plot
+
+ggplot(
+  route_summary,
+  aes(
+    x = proportion * 100,
+    y = precision_median
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = precision_lower,
+      ymax = precision_upper
+    ),
+    fill = "#6C90B9",
+    alpha = 0.25
+  ) +
+  geom_line(
+    colour = "#6C90B9",
+    linewidth = 1.2
+  ) +
+  scale_x_continuous(
+    breaks = seq(30, 100, 10)
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "How many Routes need to be surveyed?",
+    subtitle = "Random subsets of routes",
+    x = "Routes Sampled (%)",
+    y = "Agreement with the full-survey acoustic detection estimate",
+    caption = " ribbon shows the central 95% of simulated estimates"
+  ) +
+  theme_pubr()
+
+```
+
